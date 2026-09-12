@@ -1,35 +1,125 @@
-# Аномальная Зона (Anomaly Zone Mini-Game)
+# Anomaly Zone Mini-Game
 
-Интерактивный модуль-мини-игра для настольных ролевых игр сталкерской, научно-фантастической или постапокалиптической тематики (например, **S.T.A.L.K.E.R.**, **Metro**, **Fallout**). Разработан как независимое веб-приложение, которое легко встраивается в **Foundry VTT** через `IFrame` или как самостоятельный готовый модуль.
+A procedural browser mini-game and Foundry VTT module for hazardous-zone exploration in post-apocalyptic / science-fiction tabletop campaigns.
 
-## 🌟 Возможности (Features)
+The project turns exploration into a small hidden-information system: the GM configures a zone, players move through an unknown grid, use tools to probe nearby cells, discover loot and try to reach an exit without walking into anomalies or dangerous radiation.
 
-* **Процедурная генерация карт:** Настраивайте размеры сетки (M x N), плотность аномалий, количество схронов, артефактов и выходов. Карта генерируется на основе случайного сида (`seed`) + соли (`salt`), обеспечивая повторяемость.
-* **Гарантированный безопасный путь:** Алгоритм гарантирует, что от входа до хотя бы одного из выходов будет проложена непрерывная полоса, свободная от аномалий и радиации.
-* **Гибкий редактор лута (Новинка!):** Отдельная вкладка позволяет ГМу полностью настроить содержимое хабара (как в схронах, так и при поднятии артефактов). Задавайте любые названия предметов и их **шанс выпадения (вес)**.
-* **6 типов аномалий с уникальными эффектами:**
+> Inspired by the general atmosphere of post-apocalyptic exploration games. This is an independent fan-made tabletop utility and is not affiliated with any referenced commercial franchise.
 
-  * 🔥 **Столб пламени:** Огненный столб, наносящий прямой ущерб.
-  * ⚡ **Электра:** Электрический разряд с высоким мгновенным уроном.
-  * 💨 **Трамплин:** Динамическая аномалия, физически отбрасывающая (телепортирующая) группу в случайную точку на карте.
-  * 🫧 **Сфера:** Расширяющаяся аномалия. Стекание в неё вызывает взрывной эффект, заражающий все 8 соседних пустых клеток. Расширяется только один раз, исключая мертвые петли.
-  * 🌀 **Воронка (Новинка!):** Гравитационное искажение, которое затягивает группу и отбрасывает на случайную соседнюю клетку.
-  * ⏳ **Хроно-сдвиг (Новинка!):** Временная петля, возвращающая команду в самое начало пути (на клетку входа).
-* **Зоны радиационного заражения:** Интуитивная визуализация уровня радиации с помощью тепловых цветов (зеленый -> желтый -> оранжевый). Плотность регулируется ползунком (0-100%).
-* **Инструменты Сталкера:**
+## Highlights
 
-  * 🎯 **Бросок болта:** Направленная проверка соседних клеток на наличие скрытых аномалий.
-  * 📟 **Детектор радиации (Счётчик Гейгера):** Сканирует область 5х5 вокруг группы и показывает точный уровень фона.
-  * 🔬 **Анализатор артефактов:** Сканирует радиус в 3 клетки на наличие ценного хабара.
-* **Режим мастера (GM Mode):** Возможность в один клик показать всю скрытую карту (аномалии, радиацию, схроны и артефакты) со встроенными показателями уровней прямо поверх клеток.
-* **Полная адаптивность:** Сетка корректно масштабируется под гигантские размеры (например, 30х30) благодаря виртуализированной полосе прокрутки, предотвращая искажение ячеек.
+- procedural grid generation;
+- reproducible generation based on seed/salt;
+- guaranteed safe route to at least one exit;
+- configurable anomaly and radiation density;
+- multiple anomaly behaviours;
+- hidden caches and artifacts;
+- weighted loot configuration;
+- player exploration tools;
+- GM reveal/debug mode;
+- responsive large-grid UI;
+- Foundry VTT integration files;
+- standalone web application workflow.
 
----
+## Gameplay systems
 
-## ⚡ Оптимизация сборки и скорость загрузки
+### Procedural zone
 
-Модуль спроектирован с упором на максимальное быстродействие:
+The generator can configure:
 
-* **Нулевые внешние запросы к бэкандам:** Логика генерации полностью работает на стороне клиента в браузере (на основе детерминированного генератора `Mulberry32`). Это экономит трафик и убирает задержки.
-* **Использование Tailwind \& Vite:** Итоговый бандл имеет ультра-легкий размер (\~120KB), что гарантирует мгновенную загрузку даже на медленном подключении к серверу Foundry.
+- grid dimensions;
+- anomaly density;
+- radiation density;
+- number of caches;
+- artifact placement;
+- exits;
+- weighted loot.
 
+A deterministic random generator makes a zone reproducible from the same configuration.
+
+### Safe-path constraint
+
+The generator preserves at least one traversable route between the entry point and an exit. This keeps random generation from producing an unwinnable map.
+
+### Player tools
+
+The exploration layer includes tools for revealing or evaluating nearby danger, including:
+
+- directed anomaly probing;
+- local radiation scanning;
+- artifact scanning.
+
+### GM mode
+
+The GM can reveal hidden zone information for administration, debugging or running the encounter.
+
+## Foundry VTT
+
+The repository includes `module.json` and `module.js` integration files in addition to the standalone application.
+
+This allows the project to be used as a tabletop utility rather than only as a separate browser game.
+
+## Tech stack
+
+| Area | Technology |
+| --- | --- |
+| UI | React 19 |
+| Language | TypeScript |
+| Build | Vite, esbuild |
+| Styling | Tailwind CSS |
+| Icons / motion | Lucide React, Motion |
+| Support layer | Node.js, Express, WebSocket |
+| VTT integration | Foundry module files |
+
+## Local development
+
+```bash
+git clone https://github.com/theDAREK497/ANOMALY-ZONE-mini-game.git
+cd ANOMALY-ZONE-mini-game
+npm ci
+npm run dev
+```
+
+Type-check/lint:
+
+```bash
+npm run lint
+```
+
+Production build:
+
+```bash
+npm run build
+npm start
+```
+
+## Repository structure
+
+The project contains both application and integration layers:
+
+```text
+src/                 React/TypeScript application code
+server.ts            Node support/server layer
+module.json          Foundry VTT module metadata
+module.js            Foundry VTT integration code
+app-template.html    embedded/application template
+db_*.json            configurable local game data
+dist/                 built output
+```
+
+## Engineering focus
+
+The interesting part of this project is not only the UI. It is the combination of:
+
+- constrained procedural generation;
+- deterministic randomness;
+- hidden information;
+- GM/player interaction;
+- configurable game data;
+- embedding the result into an existing tabletop platform.
+
+## Status
+
+Active side project / tabletop utility.
+
+Future work can include stronger automated tests around generator invariants, versioned Foundry compatibility, packaging/release automation and cleaner separation between standalone and VTT-specific layers.
