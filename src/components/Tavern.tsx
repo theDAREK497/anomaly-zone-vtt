@@ -1753,10 +1753,10 @@ export const Tavern: React.FC<TavernProps> = ({
                 <div className="flex gap-2 min-w-max">
                   <span className="text-[10px] text-gray-500 uppercase flex flex-col justify-center select-none">Шаблоны:</span>
                   {[
-                    { name: 'Водка «Казаки»', price: '50', type: 'med', desc: '-10 RAD, лечит душу' },
-                    { name: 'Аптечка АИ-2', price: '150', type: 'med', desc: '+50 HP' },
+                    { name: 'Водка «Казаки»', price: '50', type: 'med', desc: '-10 радиации, лечит душу' },
+                    { name: 'Аптечка АИ-2', price: '150', type: 'med', desc: '+50 ОЗ' },
                     { name: 'Бинт', price: '30', type: 'med', desc: 'Останавливает кровотечение' },
-                    { name: 'Антирад', price: '200', type: 'med', desc: '-50 RAD' },
+                    { name: 'Антирад', price: '200', type: 'med', desc: '-50 радиации' },
                     { name: 'Консервы «Завтрак туриста»', price: '45', type: 'misc', desc: 'Утоляет голод' },
                     { name: 'Энергетик «Stalker»', price: '60', type: 'misc', desc: '+Выносливость' },
                     { name: 'Болты', price: '5', type: 'misc', desc: 'Для проверки аномалий' },
@@ -1768,7 +1768,7 @@ export const Tavern: React.FC<TavernProps> = ({
                     { name: 'АКМ 74/2', price: '2200', type: 'weapon', desc: 'Надежный штурмовой автомат' },
                     { name: 'Кожаная куртка', price: '300', type: 'armor', desc: 'Защита: слабая' },
                     { name: 'Заря', price: '1500', type: 'armor', desc: 'Костюм сталкера' },
-                    { name: 'Артефакт «Медуза»', price: '800', type: 'art', desc: '-2 RAD, пулестойкость' },
+                    { name: 'Артефакт «Медуза»', price: '800', type: 'art', desc: '-2 радиации, пулестойкость' },
                     { name: 'Артефакт «Кровь камня»', price: '1200', type: 'art', desc: '+5 ХП/сек' },
                   ].map((preset, idx) => (
                     <button
@@ -1875,7 +1875,7 @@ export const Tavern: React.FC<TavernProps> = ({
                   <label className="block text-gray-400 mb-1">Описание/Эффект:</label>
                   <input
                     type="text"
-                    placeholder="Защищает от пси-излучения, +50 HP"
+                    placeholder="Защищает от пси-излучения, +50 ОЗ"
                     value={gmItemDesc}
                     onChange={(e) => setGmItemDesc(e.target.value)}
                     className="w-full bg-gray-900 border border-gray-800 rounded p-2 text-xs font-mono text-gray-200 outline-none focus:border-amber-900"
@@ -2718,7 +2718,7 @@ export const Tavern: React.FC<TavernProps> = ({
                         <label className="block text-gray-400 mb-1">Описание/Эффект:</label>
                         <input
                           type="text"
-                          placeholder="Защищает от пси-излучения, +50 HP"
+                          placeholder="Защищает от пси-излучения, +50 ОЗ"
                           value={gmItemDesc}
                           onChange={(e) => setGmItemDesc(e.target.value)}
                           className="w-full bg-gray-900 border border-gray-800 rounded p-2 text-xs font-mono text-gray-200 outline-none focus:border-amber-900"

@@ -1,63 +1,61 @@
-# Anomaly Zone Mini-Game
+# Anomaly Zone VTT
 
-A procedural browser mini-game and Foundry VTT module for hazardous-zone exploration in post-apocalyptic / science-fiction tabletop campaigns.
+[![CI](https://github.com/theDAREK497/anomaly-zone-vtt/actions/workflows/ci.yml/badge.svg)](https://github.com/theDAREK497/anomaly-zone-vtt/actions/workflows/ci.yml)
 
-The project turns exploration into a small hidden-information system: the GM configures a zone, players move through an unknown grid, use tools to probe nearby cells, discover loot and try to reach an exit without walking into anomalies or dangerous radiation.
+A procedural browser mini-game and Foundry VTT utility for hazardous-zone exploration in post-apocalyptic and science-fiction tabletop campaigns.
 
-> Inspired by the general atmosphere of post-apocalyptic exploration games. This is an independent fan-made tabletop utility and is not affiliated with any referenced commercial franchise.
+The project combines deterministic map generation, hidden information, anomaly encounters, player/GM interaction and a WebSocket-backed multiplayer support layer.
+
+> Independent tabletop utility. It is not affiliated with any referenced commercial franchise.
 
 ## Highlights
 
-- procedural grid generation;
-- reproducible generation based on seed/salt;
-- guaranteed safe route to at least one exit;
+- deterministic procedural maps based on seed and salt;
+- protected route generation between the entrance and an exit;
 - configurable anomaly and radiation density;
-- multiple anomaly behaviours;
-- hidden caches and artifacts;
-- weighted loot configuration;
-- player exploration tools;
-- GM reveal/debug mode;
-- responsive large-grid UI;
-- Foundry VTT integration files;
-- standalone web application workflow.
+- 14 anomaly definitions with multiple encounter styles;
+- 7 field encounters, 4 interactive puzzle encounters and 3 roll-driven encounters;
+- anomaly journal and encounter state;
+- player tools for probing, radiation scanning and artifact detection;
+- GM controls and reveal/debug workflows;
+- WebSocket synchronization between GM and players;
+- Foundry VTT module metadata and integration files;
+- automated gameplay and server integration checks.
 
-## Gameplay systems
+## Architecture
 
-### Procedural zone
+```mermaid
+flowchart LR
+    Config[GM configuration] --> Generator[Deterministic generator]
+    Generator --> Map[Hazardous zone]
+    Map --> Encounter[Anomaly encounter system]
+    Encounter --> Journal[Encounter journal]
 
-The generator can configure:
+    GM[GM client] <--> WS[WebSocket server]
+    Player[Player client] <--> WS
+    WS <--> State[Shared game state]
 
-- grid dimensions;
-- anomaly density;
-- radiation density;
-- number of caches;
-- artifact placement;
-- exits;
-- weighted loot.
+    Foundry[Foundry VTT] --> Module[module.js / module.json]
+    Module --> App[React application]
+```
 
-A deterministic random generator makes a zone reproducible from the same configuration.
+## Anomaly system
 
-### Safe-path constraint
+The anomaly catalogue currently contains 14 definitions split across three gameplay styles:
 
-The generator preserves at least one traversable route between the entry point and an exit. This keeps random generation from producing an unwinnable map.
+- **7 field encounters** for immediate environmental effects;
+- **4 puzzle encounters** with deterministic, seed-based challenges;
+- **3 roll-driven encounters** for tabletop-style resolution.
 
-### Player tools
+The validation script checks catalogue consistency, deterministic generation, puzzle solvability, seeded field outcomes, dice distribution and encounter timer rules.
 
-The exploration layer includes tools for revealing or evaluating nearby danger, including:
+## Automated validation
 
-- directed anomaly probing;
-- local radiation scanning;
-- artifact scanning.
+The repository includes two purpose-built test scripts rather than only UI smoke tests.
 
-### GM mode
+`npm run check:anomalies` validates the core anomaly catalogue and gameplay logic across hundreds of generated cases.
 
-The GM can reveal hidden zone information for administration, debugging or running the encounter.
-
-## Foundry VTT
-
-The repository includes `module.json` and `module.js` integration files in addition to the standalone application.
-
-This allows the project to be used as a tabletop utility rather than only as a separate browser game.
+`npm run test:anomaly-server` builds and starts the production server, connects WebSocket clients and checks multiplayer/server behaviour including encounter completion, timers, pause/resume, acknowledgement, failure states, retreat, damage and movement effects.
 
 ## Tech stack
 
@@ -67,59 +65,78 @@ This allows the project to be used as a tabletop utility rather than only as a s
 | Language | TypeScript |
 | Build | Vite, esbuild |
 | Styling | Tailwind CSS |
-| Icons / motion | Lucide React, Motion |
-| Support layer | Node.js, Express, WebSocket |
-| VTT integration | Foundry module files |
+| Motion / icons | Motion, Lucide React |
+| Server | Node.js, Express |
+| Realtime | WebSocket (`ws`) |
+| VTT integration | Foundry VTT module files |
+| CI | GitHub Actions |
 
 ## Local development
 
 ```bash
-git clone https://github.com/theDAREK497/ANOMALY-ZONE-mini-game.git
-cd ANOMALY-ZONE-mini-game
+git clone https://github.com/theDAREK497/anomaly-zone-vtt.git
+cd anomaly-zone-vtt
 npm ci
 npm run dev
 ```
 
-Type-check/lint:
+## Validation
+
+Run the complete local validation sequence:
 
 ```bash
 npm run lint
-```
-
-Production build:
-
-```bash
+npm run check:anomalies
 npm run build
-npm start
+npm run test:anomaly-server
+npm audit
 ```
+
+The server integration test expects the production bundle from `npm run build`.
+
+## Foundry VTT
+
+The repository includes:
+
+```text
+module.json
+module.js
+app-template.html
+dist/
+```
+
+Manifest URL:
+
+```text
+https://raw.githubusercontent.com/theDAREK497/anomaly-zone-vtt/main/module.json
+```
+
+The module metadata targets Foundry compatibility from v11 and is currently marked as verified through v14.
 
 ## Repository structure
 
-The project contains both application and integration layers:
-
 ```text
-src/                 React/TypeScript application code
-server.ts            Node support/server layer
-module.json          Foundry VTT module metadata
-module.js            Foundry VTT integration code
-app-template.html    embedded/application template
-db_*.json            configurable local game data
-dist/                 built output
+src/
+  components/               React gameplay/UI components
+  data/anomalies.ts         anomaly catalogue
+  utils/generator.ts        deterministic zone generation
+  utils/anomaly-gameplay.ts anomaly encounter logic
+scripts/
+  validate-anomalies.ts     deterministic/gameplay validation
+  test-anomaly-server.ts    WebSocket/server integration checks
+server.ts                   multiplayer support server
+module.json                 Foundry VTT metadata
+module.js                   Foundry integration
+db_*.json                   configurable local game data
+dist/                       production output
 ```
 
 ## Engineering focus
 
-The interesting part of this project is not only the UI. It is the combination of:
+The project is primarily an exploration of deterministic procedural systems and stateful multiplayer tabletop tooling.
 
-- constrained procedural generation;
-- deterministic randomness;
-- hidden information;
-- GM/player interaction;
-- configurable game data;
-- embedding the result into an existing tabletop platform.
+The most important invariants are executable rather than only documented: the anomaly catalogue, generated puzzles, random outcomes, encounter timers and multiplayer server flows are covered by automated validation scripts and CI.
 
-## Status
+## License
 
-Active side project / tabletop utility.
-
-Future work can include stronger automated tests around generator invariants, versioned Foundry compatibility, packaging/release automation and cleaner separation between standalone and VTT-specific layers.
+Mozilla Public License 2.0. See `LICENSE`.

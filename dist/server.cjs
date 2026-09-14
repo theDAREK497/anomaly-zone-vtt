@@ -28,6 +28,286 @@ var import_http = __toESM(require("http"), 1);
 var import_fs = __toESM(require("fs"), 1);
 var import_ws = require("ws");
 var import_vite = require("vite");
+
+// src/utils/random.ts
+function createRandomGenerator(seedString) {
+  let h = 1779033703 ^ seedString.length;
+  for (let i = 0; i < seedString.length; i++) {
+    h = Math.imul(h ^ seedString.charCodeAt(i), 3432918353);
+    h = h << 13 | h >>> 19;
+  }
+  let a = (function() {
+    h = Math.imul(h ^ h >>> 16, 2246822507);
+    h = Math.imul(h ^ h >>> 13, 3266489909);
+    return (h ^= h >>> 16) >>> 0;
+  })();
+  return function() {
+    let t = a += 1831565813;
+    t = Math.imul(t ^ t >>> 15, t | 1);
+    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function randomInt(rng, min, max) {
+  return Math.floor(rng() * (max - min + 1)) + min;
+}
+
+// src/utils/anomaly-gameplay.ts
+var FIELD_EFFECTS = {
+  "spore-forest": ["damage", "spread"],
+  "druse-growth": ["spread"],
+  "gravity-fracture": ["damage", "teleport"],
+  "spatial-seam": ["teleport"],
+  "thermal-pocket": ["damage"],
+  "rust-wave": ["damage", "spread"],
+  "eon-storm": ["damage", "teleport", "spread"]
+};
+function encounterKind(id) {
+  if (FIELD_EFFECTS[id]) return "field";
+  return ["crystal-resonance", "echo-loop", "static-front", "living-track"].includes(id) ? "puzzle" : "rolls";
+}
+var RESULT_LABELS = { completeSuccess: "\u041F\u043E\u043B\u043D\u044B\u0439 \u0443\u0441\u043F\u0435\u0445", successWithCost: "\u0423\u0441\u043F\u0435\u0445 \u0441 \u0446\u0435\u043D\u043E\u0439", partialFailure: "\u0427\u0430\u0441\u0442\u0438\u0447\u043D\u0430\u044F \u043D\u0435\u0443\u0434\u0430\u0447\u0430", failure: "\u041D\u0435\u0443\u0434\u0430\u0447\u0430", criticalFailure: "\u041A\u0440\u0438\u0442\u0438\u0447\u0435\u0441\u043A\u0430\u044F \u043D\u0435\u0443\u0434\u0430\u0447\u0430", retreat: "\u041E\u0442\u0441\u0442\u0443\u043F\u043B\u0435\u043D\u0438\u0435" };
+var SYMBOLS = ["\u25CF", "\u25B2", "\u25A0", "\u25C6", "\u2605", "\u263E", "\u271A", "\u2B21"];
+function shuffle(values, rng) {
+  const copy = [...values];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = randomInt(rng, 0, i);
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+function encounterSeconds(difficulty) {
+  return difficulty <= 3 ? 120 : 60;
+}
+function rollThreeDice(seed, index) {
+  const rng = createRandomGenerator(`${seed}:dice:${index}`);
+  return Array.from({ length: 3 }, () => randomInt(rng, 1, 6));
+}
+function tickAnomalyClock(encounter, enabled) {
+  if (encounter.result || encounter.paused || !enabled) return "paused";
+  encounter.timeRemaining = Math.max(0, (encounter.timeRemaining ?? 60) - 1);
+  return encounter.timeRemaining === 0 ? "expired" : "tick";
+}
+function createPuzzle(id, seed, difficulty) {
+  const rng = createRandomGenerator(`${seed}:puzzle`);
+  const p = { kind: "sequence", stage: "study", revision: 0, limit: 3, left: [], right: [], links: [], connected: [], sequence: [], reverse: id === "echo-loop", cursor: 0, size: 0, walls: [], position: 0, goal: 0, visited: [] };
+  if (id === "static-front") {
+    p.kind = "wires";
+    p.stage = "solve";
+    const count = difficulty <= 3 ? 4 : 6;
+    const symbols = shuffle(SYMBOLS.map((_, i) => i), rng).slice(0, count);
+    p.left = shuffle(symbols, rng);
+    p.right = shuffle(symbols, rng);
+    p.links = shuffle(symbols.map((_, i) => i), rng);
+  } else if (id === "living-track") {
+    p.kind = "maze";
+    p.stage = "solve";
+    p.size = difficulty <= 3 ? 7 : 9;
+    p.walls = Array(p.size * p.size).fill(1);
+    const corners = [p.size + 1, p.size * 2 - 2, p.size * (p.size - 2) + 1, p.size * (p.size - 2) + p.size - 2];
+    const startCorner = randomInt(rng, 0, 3);
+    p.position = corners[startCorner];
+    p.goal = corners[3 - startCorner];
+    p.walls[p.position] = 0;
+    p.visited = [p.position];
+    const stack = [p.position];
+    while (stack.length) {
+      const current = stack[stack.length - 1], x = current % p.size, y = Math.floor(current / p.size);
+      const options = shuffle([[2, 0], [-2, 0], [0, 2], [0, -2]], rng).filter(([dx2, dy2]) => x + dx2 > 0 && x + dx2 < p.size - 1 && y + dy2 > 0 && y + dy2 < p.size - 1 && p.walls[(y + dy2) * p.size + x + dx2]);
+      if (!options.length) {
+        stack.pop();
+        continue;
+      }
+      const [dx, dy] = options[0], next = (y + dy) * p.size + x + dx;
+      p.walls[(y + dy / 2) * p.size + x + dx / 2] = 0;
+      p.walls[next] = 0;
+      stack.push(next);
+    }
+  } else {
+    p.sequence = Array.from({ length: difficulty <= 3 ? 5 : 7 }, () => randomInt(rng, 0, 4));
+  }
+  return p;
+}
+function applyPuzzleInput(p, input) {
+  if (!input || input.revision !== p.revision) return "ignored";
+  const a = input.a, b = input.b;
+  let result = "ignored";
+  if (p.kind === "sequence" && p.stage === "study" && input.kind === "ready") {
+    p.stage = "solve";
+    result = "correct";
+  } else if (p.kind === "sequence" && p.stage === "solve" && input.kind === "symbol" && Number.isInteger(a) && a >= 0 && a < 5) {
+    const expected = p.sequence[p.reverse ? p.sequence.length - 1 - p.cursor : p.cursor];
+    if (a === expected) {
+      p.cursor++;
+      result = p.cursor === p.sequence.length ? "complete" : "correct";
+    } else {
+      p.cursor = 0;
+      result = "mistake";
+    }
+  } else if (p.kind === "wires" && input.kind === "wire" && Number.isInteger(a) && Number.isInteger(b) && a >= 0 && a < p.left.length && b >= 0 && b < p.right.length && !p.connected.includes(a)) {
+    if (p.links[a] === b) {
+      p.connected.push(a);
+      result = p.connected.length === p.left.length ? "complete" : "correct";
+    } else result = "mistake";
+  } else if (p.kind === "maze" && input.kind === "step" && Number.isInteger(a) && a >= 0 && a < p.walls.length) {
+    const distance = Math.abs(a % p.size - p.position % p.size) + Math.abs(Math.floor(a / p.size) - Math.floor(p.position / p.size));
+    if (distance !== 1) return "ignored";
+    if (p.walls[a]) result = "mistake";
+    else {
+      p.position = a;
+      if (!p.visited.includes(a)) p.visited.push(a);
+      result = p.position === p.goal ? "complete" : "correct";
+    }
+  }
+  if (result !== "ignored") p.revision++;
+  return result;
+}
+function fieldOutcome(id, seed, visit, safeCells, expandableCells) {
+  const rng = createRandomGenerator(`${seed}:field:${visit}`), effects = FIELD_EFFECTS[id] || [];
+  const damage = effects.includes("damage") ? randomInt(rng, 6, 18) : 0;
+  const destination = effects.includes("teleport") && safeCells.length ? safeCells[randomInt(rng, 0, safeCells.length - 1)] : null;
+  const candidates = expandableCells.filter((index) => index !== destination);
+  return {
+    damage,
+    destination,
+    expansion: effects.includes("spread") && candidates.length ? candidates[randomInt(rng, 0, candidates.length - 1)] : null
+  };
+}
+
+// src/data/anomalies.ts
+var phases = [
+  { id: "dormant", label: "\u041F\u043E\u043A\u043E\u0439", description: "\u0417\u0430\u043A\u043E\u043D \u043F\u0440\u043E\u044F\u0432\u043B\u044F\u0435\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u043A\u043E\u0441\u0432\u0435\u043D\u043D\u044B\u043C\u0438 \u043F\u0440\u0438\u0437\u043D\u0430\u043A\u0430\u043C\u0438.", transition: { minRounds: 1 } },
+  { id: "warning", label: "\u041F\u0440\u0435\u0434\u0443\u043F\u0440\u0435\u0436\u0434\u0435\u043D\u0438\u0435", description: "\u041E\u043F\u0430\u0441\u043D\u043E\u0441\u0442\u044C \u0441\u043E\u043E\u0431\u0449\u0430\u0435\u0442 \u043E \u0441\u0435\u0431\u0435 \u043F\u043E\u0432\u0442\u043E\u0440\u044F\u0435\u043C\u044B\u043C \u0441\u0438\u0433\u043D\u0430\u043B\u043E\u043C.", transition: { minRounds: 2 } },
+  { id: "active", label: "\u0410\u043A\u0442\u0438\u0432\u043D\u0430\u044F", description: "\u0410\u043D\u043E\u043C\u0430\u043B\u0438\u044F \u043E\u0442\u0432\u0435\u0447\u0430\u0435\u0442 \u043D\u0430 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u044F \u044D\u043A\u0438\u043F\u0430\u0436\u0430.", transition: { minRounds: 3 } },
+  { id: "collapse", label: "\u041A\u043E\u043B\u043B\u0430\u043F\u0441", description: "\u041E\u0448\u0438\u0431\u043A\u0438 \u043D\u0430\u043A\u043E\u043F\u043B\u0435\u043D\u044B; \u043E\u0442\u0441\u0442\u0443\u043F\u043B\u0435\u043D\u0438\u0435 \u0431\u043E\u043B\u0435\u0435 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u043D\u043E.", transition: { minMistakes: 3, maxStability: 25 } },
+  { id: "aftermath", label: "\u041F\u043E\u0441\u043B\u0435\u0434\u0441\u0442\u0432\u0438\u044F", description: "\u0417\u0430\u043A\u043E\u043D \u0437\u0430\u0442\u0438\u0445, \u043E\u0441\u0442\u0430\u0432\u043B\u044F\u044F \u0441\u043B\u0435\u0434\u044B \u0438 \u0434\u043E\u0431\u044B\u0447\u0443.", transition: { onResult: ["completeSuccess", "successWithCost", "partialFailure", "failure", "criticalFailure", "retreat"] } }
+];
+var accessibility = {
+  signals: ["\u0446\u0432\u0435\u0442", "\u0441\u0438\u043C\u0432\u043E\u043B", "\u0444\u043E\u0440\u043C\u0430", "\u0442\u0435\u043A\u0441\u0442", "\u0437\u0432\u0443\u043A \u043F\u0440\u0438 \u0432\u043A\u043B\u044E\u0447\u0451\u043D\u043D\u043E\u043C \u0430\u0443\u0434\u0438\u043E"],
+  timerOptional: true,
+  gmPause: true,
+  keyboard: true,
+  speedControl: true,
+  rollAutoResolve: true,
+  skipAnimation: true
+};
+var consequences = (theme) => ({
+  successWithCost: [`\u0423\u0441\u0442\u0430\u043B\u043E\u0441\u0442\u044C, \u0441\u0442\u0440\u0435\u0441\u0441 \u0438\u043B\u0438 \u0432\u0440\u0435\u043C\u0435\u043D\u043D\u044B\u0439 \u044D\u0444\u0444\u0435\u043A\u0442: ${theme}.`],
+  partialFailure: [`\u041D\u0430\u043A\u043E\u043F\u043B\u0435\u043D\u043D\u0430\u044F \u044D\u043A\u0441\u043F\u043E\u0437\u0438\u0446\u0438\u044F \u0438 \u043F\u043E\u043C\u0435\u0445\u0430: ${theme}; \u0434\u043E\u0441\u0442\u0443\u043F\u043D\u043E \u043B\u0435\u0447\u0435\u043D\u0438\u0435 \u0438\u043B\u0438 \u0438\u0441\u0441\u043B\u0435\u0434\u043E\u0432\u0430\u043D\u0438\u0435.`],
+  failure: [`\u0421\u0435\u0440\u044C\u0451\u0437\u043D\u0430\u044F, \u043D\u043E \u043E\u0431\u0440\u0430\u0442\u0438\u043C\u0430\u044F \u0442\u0440\u0430\u0432\u043C\u0430 \u043B\u0438\u0431\u043E \u0437\u0430\u0440\u0430\u0436\u0435\u043D\u0438\u0435: ${theme}.`],
+  criticalFailure: [`\u041A\u0440\u0438\u0442\u0438\u0447\u0435\u0441\u043A\u043E\u0435 \u043F\u043E\u0441\u043B\u0435\u0434\u0441\u0442\u0432\u0438\u0435 \u043F\u043E\u0441\u043B\u0435 \u043D\u0430\u043A\u043E\u043F\u043B\u0435\u043D\u043D\u044B\u0445 \u043E\u0448\u0438\u0431\u043E\u043A \u0438\u043B\u0438 \u043A\u043E\u043B\u043B\u0430\u043F\u0441\u0430: ${theme}.`]
+});
+var train = (systems, theme) => ({
+  affectedTrainSystems: systems,
+  affectedWagons: ["\u043B\u043E\u043A\u043E\u043C\u043E\u0442\u0438\u0432 \u0438\u043B\u0438 \u0431\u043B\u0438\u0436\u0430\u0439\u0448\u0438\u0439 \u043A \u043E\u0447\u0430\u0433\u0443 \u0432\u0430\u0433\u043E\u043D", "\u043E\u0441\u0442\u0430\u043B\u044C\u043D\u044B\u0435 \u0432\u0430\u0433\u043E\u043D\u044B \u0442\u043E\u043B\u044C\u043A\u043E \u043F\u0440\u0438 \u0440\u0430\u0441\u043F\u0440\u043E\u0441\u0442\u0440\u0430\u043D\u0435\u043D\u0438\u0438/\u043A\u043E\u043B\u043B\u0430\u043F\u0441\u0435"],
+  speedInteraction: `\u0421\u043D\u0438\u0436\u0435\u043D\u0438\u0435 \u0441\u043A\u043E\u0440\u043E\u0441\u0442\u0438 \u0443\u043C\u0435\u043D\u044C\u0448\u0430\u0435\u0442 \u0440\u0438\u0441\u043A; \u0440\u0435\u0437\u043A\u0438\u0439 \u0440\u0430\u0437\u0433\u043E\u043D \u0443\u0441\u0438\u043B\u0438\u0432\u0430\u0435\u0442 ${theme}.`,
+  fuelInteraction: "\u0420\u0430\u0441\u0445\u043E\u0434 \u0442\u043E\u043F\u043B\u0438\u0432\u0430 \u043C\u0435\u043D\u044F\u0435\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u043F\u0440\u0438 \u043C\u0430\u043D\u0451\u0432\u0440\u0435, \u043E\u0431\u0445\u043E\u0434\u0435 \u0438\u043B\u0438 \u0430\u0432\u0430\u0440\u0438\u0439\u043D\u043E\u043C \u0442\u043E\u0440\u043C\u043E\u0436\u0435\u043D\u0438\u0438.",
+  powerInteraction: "\u0421\u0438\u0441\u0442\u0435\u043C\u0443 \u043C\u043E\u0436\u043D\u043E \u043E\u0431\u0435\u0441\u0442\u043E\u0447\u0438\u0442\u044C \u0438 \u0438\u0437\u043E\u043B\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0434\u043E \u043F\u0440\u043E\u0445\u043E\u0436\u0434\u0435\u043D\u0438\u044F \u043E\u0447\u0430\u0433\u0430.",
+  cargoInteraction: "\u041E\u043F\u0430\u0441\u043D\u044B\u0439 \u0433\u0440\u0443\u0437 \u043C\u043E\u0436\u043D\u043E \u0441\u0431\u0440\u043E\u0441\u0438\u0442\u044C \u0438\u043B\u0438 \u043F\u0435\u0440\u0435\u043D\u0435\u0441\u0442\u0438 \u0432 \u0438\u0437\u043E\u043B\u0438\u0440\u043E\u0432\u0430\u043D\u043D\u044B\u0439 \u0432\u0430\u0433\u043E\u043D.",
+  possibleTemporaryFaults: [`\u0412\u0440\u0435\u043C\u0435\u043D\u043D\u044B\u0439 \u043E\u0442\u043A\u0430\u0437: ${theme}`, "\u043E\u0433\u0440\u0430\u043D\u0438\u0447\u0435\u043D\u0438\u0435 \u0441\u043A\u043E\u0440\u043E\u0441\u0442\u0438", "\u043B\u043E\u043A\u0430\u043B\u044C\u043D\u043E\u0435 \u043E\u0442\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u0435 \u0441\u0438\u0441\u0442\u0435\u043C\u044B"],
+  possiblePermanentFaults: [`\u041F\u043E\u0432\u0440\u0435\u0436\u0434\u0435\u043D\u0438\u0435 \u043E\u0434\u043D\u043E\u0433\u043E \u0443\u0437\u043B\u0430 \u043F\u043E\u0441\u043B\u0435 \u043A\u043E\u043B\u043B\u0430\u043F\u0441\u0430: ${theme}`],
+  repairOptions: ["\u0438\u0437\u043E\u043B\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0432\u0430\u0433\u043E\u043D", "\u043E\u0431\u0435\u0441\u0442\u043E\u0447\u0438\u0442\u044C \u0441\u0438\u0441\u0442\u0435\u043C\u0443", "\u0441\u0431\u0440\u043E\u0441\u0438\u0442\u044C \u0433\u0440\u0443\u0437", "\u043F\u043E\u043B\u0435\u0432\u043E\u0439 \u0440\u0435\u043C\u043E\u043D\u0442: \u0438\u043D\u0436\u0435\u043D\u0435\u0440\u043D\u043E\u0435 \u0434\u0435\u043B\u043E \u0438\u043B\u0438 \u043C\u0435\u0445\u0430\u043D\u0438\u043A\u0430", "\u043E\u0442\u0441\u0442\u0443\u043F\u0438\u0442\u044C \u0434\u043E \u043A\u043E\u043B\u043B\u0430\u043F\u0441\u0430"]
+});
+var rollActions = [
+  { id: "observe", label: "\u0418\u0437\u0443\u0447\u0438\u0442\u044C \u0437\u0430\u043A\u043E\u043D", description: "\u041F\u043E\u043B\u0443\u0447\u0438\u0442\u044C \u043D\u0430\u0431\u043B\u044E\u0434\u0430\u0435\u043C\u044B\u0439 \u0441\u0438\u0433\u043D\u0430\u043B \u0438 \u043E\u0442\u043A\u0440\u044B\u0442\u044C \u043F\u043E\u0434\u0441\u043A\u0430\u0437\u043A\u0443.", kind: "observe", skillTags: ["observation", "research"], stabilityDelta: 4 },
+  { id: "probe", label: "\u041F\u0440\u043E\u0432\u0435\u0440\u0438\u0442\u044C \u0433\u0438\u043F\u043E\u0442\u0435\u0437\u0443", description: "\u041E\u0441\u0442\u043E\u0440\u043E\u0436\u043D\u043E\u0435 \u0432\u0437\u0430\u0438\u043C\u043E\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435 \u043F\u043E\u0441\u043B\u0435 \u043D\u0430\u0431\u043B\u044E\u0434\u0435\u043D\u0438\u044F.", kind: "interact", skillTags: ["physics", "engineering"], advances: true, stabilityDelta: 12, exposureDelta: 5 },
+  { id: "isolate", label: "\u0418\u0437\u043E\u043B\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0443\u0447\u0430\u0441\u0442\u043E\u043A", description: "\u0417\u0430\u0449\u0438\u0442\u0438\u0442\u044C \u043B\u044E\u0434\u0435\u0439 \u0438\u043B\u0438 \u043E\u0434\u0438\u043D \u0432\u0430\u0433\u043E\u043D \u043E\u0442 \u0440\u0430\u0441\u043F\u0440\u043E\u0441\u0442\u0440\u0430\u043D\u0435\u043D\u0438\u044F.", kind: "protect", skillTags: ["engineering", "mechanic"], trainRiskDelta: -12 },
+  { id: "retreat", label: "\u041E\u0442\u0441\u0442\u0443\u043F\u0438\u0442\u044C", description: "\u041F\u043E\u043A\u0438\u043D\u0443\u0442\u044C \u043E\u0431\u043B\u0430\u0441\u0442\u044C \u0434\u043E \u043A\u043E\u043B\u043B\u0430\u043F\u0441\u0430.", kind: "retreat" }
+];
+function definition(input) {
+  const skillTags = input.gurpsResolution?.allowedSkillTags || ["observation", "survival", "research"];
+  return {
+    encounterType: encounterKind(input.id),
+    fieldEffects: FIELD_EFFECTS[input.id] || [],
+    id: input.id,
+    name: input.name,
+    description: input.description,
+    canonStatus: input.canonStatus,
+    family: input.family,
+    dangerTier: input.dangerTier,
+    tags: input.tags || [input.family, "eon", "investigation"],
+    supportedModes: input.supportedModes || ["exploration", "train-travel", "research"],
+    warningSigns: input.warningSigns,
+    detection: input.detection || { skillTags, clues: input.warningSigns, passiveSignal: input.warningSigns[0] },
+    phases: input.phases || phases,
+    minigame: input.minigame || { implementation: "gurps-placeholder", kind: "gurps-series", law: "\u0417\u0430\u043A\u043E\u043D \u0432\u044B\u044F\u0432\u043B\u044F\u0435\u0442\u0441\u044F \u043F\u043E\u0441\u043B\u0435\u0434\u043E\u0432\u0430\u0442\u0435\u043B\u044C\u043D\u044B\u043C \u043D\u0430\u0431\u043B\u044E\u0434\u0435\u043D\u0438\u0435\u043C \u0438 \u043F\u0440\u043E\u0432\u0435\u0440\u043A\u043E\u0439 \u0433\u0438\u043F\u043E\u0442\u0435\u0437.", actions: rollActions, targetProgress: 3, maxMistakes: 3 },
+    gurpsResolution: input.gurpsResolution || { requiredSuccesses: 3, allowedSkillTags: skillTags, defaultPenalty: -2, criticalSuccessMayAutoResolve: false },
+    counters: input.counters || ["\u043D\u0430\u0431\u043B\u044E\u0434\u0435\u043D\u0438\u0435", "\u0438\u0437\u043E\u043B\u044F\u0446\u0438\u044F", "\u043C\u0435\u0434\u043B\u0435\u043D\u043D\u044B\u0439 \u043A\u043E\u043D\u0442\u0440\u043E\u043B\u0438\u0440\u0443\u0435\u043C\u044B\u0439 \u043F\u0440\u043E\u0445\u043E\u0434", "\u043E\u0442\u0441\u0442\u0443\u043F\u043B\u0435\u043D\u0438\u0435"],
+    characterConsequences: input.characterConsequences || consequences(input.name),
+    trainConsequences: input.trainConsequences || train(["\u0434\u0430\u0442\u0447\u0438\u043A\u0438", "\u0445\u043E\u0434\u043E\u0432\u0430\u044F \u0447\u0430\u0441\u0442\u044C"], input.name),
+    rewards: input.rewards || ["\u043E\u0431\u0440\u0430\u0437\u0435\u0446 \u0430\u043D\u043E\u043C\u0430\u043B\u044C\u043D\u043E\u0439 \u043C\u0430\u0442\u0435\u0440\u0438\u0438", "\u0438\u0441\u0441\u043B\u0435\u0434\u043E\u0432\u0430\u0442\u0435\u043B\u044C\u0441\u043A\u0438\u0435 \u0434\u0430\u043D\u043D\u044B\u0435", "\u0432\u0440\u0435\u043C\u0435\u043D\u043D\u044B\u0439 \u0431\u043E\u043D\u0443\u0441 \u043A \u043F\u043E\u0432\u0442\u043E\u0440\u043D\u043E\u043C\u0443 \u043F\u0440\u043E\u0445\u043E\u0436\u0434\u0435\u043D\u0438\u044E"],
+    rollTables: input.rollTables || { complications: ["\u043B\u043E\u043A\u0430\u043B\u044C\u043D\u0430\u044F \u043F\u043E\u043C\u0435\u0445\u0430", "\u0432\u0440\u0435\u043C\u0435\u043D\u043D\u0430\u044F \u043D\u0435\u0438\u0441\u043F\u0440\u0430\u0432\u043D\u043E\u0441\u0442\u044C", "\u0440\u043E\u0441\u0442 \u044D\u043A\u0441\u043F\u043E\u0437\u0438\u0446\u0438\u0438"], rewards: ["\u0447\u0438\u0441\u0442\u044B\u0439 \u043E\u0431\u0440\u0430\u0437\u0435\u0446", "\u0440\u0435\u0434\u043A\u0438\u0439 \u043A\u043E\u043C\u043F\u043E\u043D\u0435\u043D\u0442", "\u043D\u0430\u0434\u0451\u0436\u043D\u0430\u044F \u043A\u0430\u0440\u0442\u0430 \u043F\u0440\u043E\u0445\u043E\u0434\u0430"] },
+    accessibility: input.accessibility || accessibility,
+    gmNotes: input.gmNotes || ["\u041D\u0435 \u0441\u043A\u0440\u044B\u0432\u0430\u0439\u0442\u0435 \u043F\u0435\u0440\u0432\u044B\u0439 \u0441\u0438\u0433\u043D\u0430\u043B \u0443\u0433\u0440\u043E\u0437\u044B.", "\u041D\u0435 \u043C\u0435\u043D\u044F\u0439\u0442\u0435 \u043F\u043E\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043D\u043D\u044B\u0439 \u0437\u0430\u043A\u043E\u043D \u0432 \u0445\u043E\u0434\u0435 \u0441\u0446\u0435\u043D\u044B.", "\u041E\u0431\u044B\u0447\u043D\u0430\u044F \u043E\u0448\u0438\u0431\u043A\u0430 \u043D\u0435 \u0443\u0431\u0438\u0432\u0430\u0435\u0442 \u043F\u0435\u0440\u0441\u043E\u043D\u0430\u0436\u0430 \u0438 \u043D\u0435 \u0443\u043D\u0438\u0447\u0442\u043E\u0436\u0430\u0435\u0442 \u0432\u0430\u0433\u043E\u043D."]
+  };
+}
+var full = (id, name, status, family, dangerTier, description, warningSigns, kind, law, actions, skills, systems) => definition({
+  id,
+  name,
+  canonStatus: status,
+  family,
+  dangerTier,
+  description,
+  warningSigns,
+  detection: { skillTags: skills, clues: warningSigns, passiveSignal: warningSigns[0] },
+  minigame: { implementation: "full", kind, law, actions, targetProgress: 3, maxMistakes: 3, sequenceLength: kind.includes("sequence") || kind.includes("pattern") ? 3 : void 0 },
+  gurpsResolution: { requiredSuccesses: 3, allowedSkillTags: skills, defaultPenalty: -dangerTier + 1, criticalSuccessMayAutoResolve: false },
+  trainConsequences: train(systems, name)
+});
+var ANOMALY_DEFINITIONS = [
+  full("spore-forest", "\u0421\u043F\u043E\u0440\u043E\u0432\u044B\u0439 \u043B\u0435\u0441", "canon", "biological", 3, "\u041A\u043E\u043B\u043E\u043D\u0438\u044F \u0440\u0435\u0430\u0433\u0438\u0440\u0443\u0435\u0442 \u043D\u0430 \u0440\u0438\u0442\u043C \u0432\u043E\u0437\u0434\u0443\u0445\u0430 \u0438 \u0432\u0438\u0431\u0440\u0430\u0446\u0438\u0438, \u0430 \u043D\u0435 \u043D\u0430 \u0441\u0430\u043C\u043E \u043F\u0440\u0438\u0441\u0443\u0442\u0441\u0442\u0432\u0438\u0435.", ["\u25C9 \u0421\u043F\u043E\u0440\u044B \u043F\u0443\u043B\u044C\u0441\u0438\u0440\u0443\u044E\u0442 \u0432\u043E\u043B\u043D\u0430\u043C\u0438 \u043E\u0442 \u043F\u043E\u0440\u044B\u0432\u043E\u0432 \u0432\u043E\u0437\u0434\u0443\u0445\u0430.", "\u25B3 \u0422\u0438\u0445\u0438\u0435 \u0443\u0447\u0430\u0441\u0442\u043A\u0438 \u043C\u0438\u0446\u0435\u043B\u0438\u044F \u0432\u0442\u044F\u0433\u0438\u0432\u0430\u044E\u0442\u0441\u044F \u043F\u0435\u0440\u0435\u0434 \u0432\u044B\u0431\u0440\u043E\u0441\u043E\u043C.", "\u0422\u0435\u043A\u0441\u0442: \u043F\u043E\u0441\u043B\u0435 \u0448\u0443\u043C\u0430 \u0441\u043B\u0435\u0434\u0443\u0435\u0442 \u0431\u0435\u0437\u043E\u043F\u0430\u0441\u043D\u0430\u044F \u043F\u0430\u0443\u0437\u0430."], "law-cycle", "\u041F\u043E\u0441\u043B\u0435 \u0437\u0430\u043C\u0435\u0442\u043D\u043E\u0433\u043E \u0432\u0434\u043E\u0445\u0430 \u043A\u043E\u043B\u043E\u043D\u0438\u0438 \u043D\u0430\u0441\u0442\u0443\u043F\u0430\u0435\u0442 \u043A\u043E\u0440\u043E\u0442\u043A\u043E\u0435 \u0431\u0435\u0437\u043E\u043F\u0430\u0441\u043D\u043E\u0435 \u043E\u043A\u043D\u043E; \u043E\u0433\u043E\u043D\u044C \u0431\u0435\u0437 \u0438\u0437\u043E\u043B\u044F\u0446\u0438\u0438 \u0432\u044B\u0437\u044B\u0432\u0430\u0435\u0442 \u043E\u0431\u0449\u0438\u0439 \u0432\u044B\u0431\u0440\u043E\u0441.", [
+    { id: "watch-breath", label: "\u041D\u0430\u0431\u043B\u044E\u0434\u0430\u0442\u044C \u0434\u044B\u0445\u0430\u043D\u0438\u0435", description: "\u041E\u0442\u0441\u043B\u0435\u0434\u0438\u0442\u044C \u0432\u0442\u044F\u0433\u0438\u0432\u0430\u043D\u0438\u0435 \u043C\u0438\u0446\u0435\u043B\u0438\u044F \u0438 \u043E\u0442\u043A\u0440\u044B\u0442\u044C \u0431\u0435\u0437\u043E\u043F\u0430\u0441\u043D\u043E\u0435 \u043E\u043A\u043D\u043E.", kind: "observe", clue: "\u0411\u0435\u0437\u043E\u043F\u0430\u0441\u043D\u043E\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435 \u2014 \u0434\u0432\u0438\u0436\u0435\u043D\u0438\u0435 \u0441\u0440\u0430\u0437\u0443 \u043F\u043E\u0441\u043B\u0435 \u0432\u0442\u044F\u0433\u0438\u0432\u0430\u043D\u0438\u044F \u0441\u043F\u043E\u0440.", skillTags: ["observation", "biology"], stabilityDelta: 5 },
+    { id: "seal-vents", label: "\u0413\u0435\u0440\u043C\u0435\u0442\u0438\u0437\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0432\u0435\u043D\u0442\u0438\u043B\u044F\u0446\u0438\u044E", description: "\u0417\u0430\u0449\u0438\u0442\u0438\u0442\u044C \u0432\u0430\u0433\u043E\u043D \u0438 \u0441\u043D\u0438\u0437\u0438\u0442\u044C \u0437\u0430\u0440\u0430\u0436\u0435\u043D\u0438\u0435.", kind: "protect", skillTags: ["engineering", "biology"], contaminationDelta: -15, trainRiskDelta: -10 },
+    { id: "cross-on-lull", label: "\u041F\u0440\u043E\u0439\u0442\u0438 \u0432 \u043F\u0430\u0443\u0437\u0443", description: "\u0414\u0432\u0438\u0433\u0430\u0442\u044C\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u0432 \u043F\u043E\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043D\u043D\u043E\u0435 \u0442\u0438\u0445\u043E\u0435 \u043E\u043A\u043D\u043E.", kind: "interact", skillTags: ["survival", "driving-locomotive"], advances: true, stabilityDelta: 18, exposureDelta: 4 },
+    { id: "burn", label: "\u0412\u044B\u0436\u0435\u0447\u044C \u043A\u043E\u0440\u0438\u0434\u043E\u0440", description: "\u0414\u043E\u0431\u0440\u043E\u0432\u043E\u043B\u044C\u043D\u044B\u0439 \u0440\u0438\u0441\u043A: \u0440\u0430\u0431\u043E\u0442\u0430\u0435\u0442 \u043B\u0438\u0448\u044C \u043F\u043E\u0441\u043B\u0435 \u0433\u0435\u0440\u043C\u0435\u0442\u0438\u0437\u0430\u0446\u0438\u0438.", kind: "train", skillTags: ["chemistry", "engineering"], advances: true, stabilityDelta: 25, contaminationDelta: 8, trainRiskDelta: 8 },
+    { id: "retreat", label: "\u041E\u0442\u0441\u0442\u0443\u043F\u0438\u0442\u044C", description: "\u0412\u0435\u0440\u043D\u0443\u0442\u044C\u0441\u044F \u043F\u043E \u0447\u0438\u0441\u0442\u043E\u043C\u0443 \u0441\u043B\u0435\u0434\u0443 \u0434\u043E \u043A\u043E\u043B\u043B\u0430\u043F\u0441\u0430.", kind: "retreat" }
+  ], ["observation", "biology", "survival", "chemistry", "engineering", "first-aid", "driving-locomotive"], ["\u0432\u0435\u043D\u0442\u0438\u043B\u044F\u0446\u0438\u044F", "\u0444\u0438\u043B\u044C\u0442\u0440\u044B", "\u0433\u0440\u0443\u0437\u043E\u0432\u043E\u0439 \u043E\u0442\u0441\u0435\u043A"]),
+  full("crystal-resonance", "\u041A\u0440\u0438\u0441\u0442\u0430\u043B\u043B\u0438\u0447\u0435\u0441\u043A\u0438\u0439 \u0440\u0435\u0437\u043E\u043D\u0430\u043D\u0441", "canon", "crystalline", 3, "\u041A\u0440\u0438\u0441\u0442\u0430\u043B\u043B\u044B \u043E\u0442\u0432\u0435\u0447\u0430\u044E\u0442 \u043D\u0430 \u0447\u0430\u0441\u0442\u043E\u0442\u044B \u0438 \u043F\u043E\u0432\u0442\u043E\u0440\u044F\u044E\u0442 \u0443\u0441\u0442\u043E\u0439\u0447\u0438\u0432\u0443\u044E \u043F\u043E\u0441\u043B\u0435\u0434\u043E\u0432\u0430\u0442\u0435\u043B\u044C\u043D\u043E\u0441\u0442\u044C \u0438\u043C\u043F\u0443\u043B\u044C\u0441\u043E\u0432.", ["\u25C7 \u0413\u0440\u0430\u043D\u0438 \u0432\u0441\u043F\u044B\u0445\u0438\u0432\u0430\u044E\u0442 \u043D\u0435\u0441\u043B\u0443\u0447\u0430\u0439\u043D\u043E\u0439 \u0442\u0440\u0451\u0445\u0447\u0430\u0441\u0442\u043D\u043E\u0439 \u0441\u0435\u0440\u0438\u0435\u0439.", "\u266A \u041F\u0435\u0440\u0435\u0434 \u0432\u044B\u0431\u0440\u043E\u0441\u043E\u043C \u0441\u043B\u044B\u0448\u0435\u043D \u0441\u043E\u0432\u043F\u0430\u0434\u0430\u044E\u0449\u0438\u0439 \u043E\u0431\u0435\u0440\u0442\u043E\u043D.", "\u0422\u0435\u043A\u0441\u0442: \u0431\u0435\u0437\u043E\u043F\u0430\u0441\u043D\u0430\u044F \u0447\u0430\u0441\u0442\u043E\u0442\u0430 \u0432\u0441\u0435\u0433\u0434\u0430 \u043F\u043E\u0432\u0442\u043E\u0440\u044F\u0435\u0442 \u043F\u0440\u0435\u0434\u044B\u0434\u0443\u0449\u0438\u0439 \u0441\u043B\u0430\u0431\u044B\u0439 \u0438\u043C\u043F\u0443\u043B\u044C\u0441."], "resonance-sequence", "\u0421\u043B\u0430\u0431\u0430\u044F \u043F\u043E\u0441\u043B\u0435\u0434\u043E\u0432\u0430\u0442\u0435\u043B\u044C\u043D\u043E\u0441\u0442\u044C \u044F\u0432\u043B\u044F\u0435\u0442\u0441\u044F \u043F\u043E\u0434\u0441\u043A\u0430\u0437\u043A\u043E\u0439; \u043E\u0442\u0432\u0435\u0442 \u0432 \u0442\u043E\u0439 \u0436\u0435 \u0447\u0430\u0441\u0442\u043E\u0442\u0435 \u0433\u0430\u0441\u0438\u0442 \u0443\u0437\u0435\u043B, \u043D\u0435\u0432\u0435\u0440\u043D\u0430\u044F \u0447\u0430\u0441\u0442\u043E\u0442\u0430 \u0443\u0441\u0438\u043B\u0438\u0432\u0430\u0435\u0442 \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0438\u0439 \u0438\u043C\u043F\u0443\u043B\u044C\u0441.", [
+    { id: "listen", label: "\u0417\u0430\u043F\u0438\u0441\u0430\u0442\u044C \u0438\u043C\u043F\u0443\u043B\u044C\u0441", description: "\u041E\u0442\u043A\u0440\u044B\u0442\u044C \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0438\u0439 \u0441\u0438\u043C\u0432\u043E\u043B \u043F\u043E\u0441\u043B\u0435\u0434\u043E\u0432\u0430\u0442\u0435\u043B\u044C\u043D\u043E\u0441\u0442\u0438.", kind: "observe", clue: "\u041F\u043E\u0432\u0442\u043E\u0440\u0438\u0442\u0435 \u043F\u043E\u043A\u0430\u0437\u0430\u043D\u043D\u0443\u044E \u0447\u0430\u0441\u0442\u043E\u0442\u0443: \u043D\u0438\u0437\u043A\u0430\u044F, \u0441\u0440\u0435\u0434\u043D\u044F\u044F \u0438\u043B\u0438 \u0432\u044B\u0441\u043E\u043A\u0430\u044F.", skillTags: ["physics", "electronics-sensors"], stabilityDelta: 4 },
+    { id: "tone-low", label: "\u041D\u0438\u0437\u043A\u0430\u044F \u0447\u0430\u0441\u0442\u043E\u0442\u0430 \u2582", description: "\u041E\u0442\u0432\u0435\u0442\u0438\u0442\u044C \u043D\u0438\u0437\u043A\u0438\u043C \u0442\u043E\u043D\u043E\u043C.", kind: "interact", advances: true },
+    { id: "tone-mid", label: "\u0421\u0440\u0435\u0434\u043D\u044F\u044F \u0447\u0430\u0441\u0442\u043E\u0442\u0430 \u2585", description: "\u041E\u0442\u0432\u0435\u0442\u0438\u0442\u044C \u0441\u0440\u0435\u0434\u043D\u0438\u043C \u0442\u043E\u043D\u043E\u043C.", kind: "interact", advances: true },
+    { id: "tone-high", label: "\u0412\u044B\u0441\u043E\u043A\u0430\u044F \u0447\u0430\u0441\u0442\u043E\u0442\u0430 \u2587", description: "\u041E\u0442\u0432\u0435\u0442\u0438\u0442\u044C \u0432\u044B\u0441\u043E\u043A\u0438\u043C \u0442\u043E\u043D\u043E\u043C.", kind: "interact", advances: true },
+    { id: "dampen", label: "\u041F\u043E\u0441\u0442\u0430\u0432\u0438\u0442\u044C \u0434\u0435\u043C\u043F\u0444\u0435\u0440\u044B", description: "\u0421\u043D\u0438\u0437\u0438\u0442\u044C \u0440\u0438\u0441\u043A \u0434\u043B\u044F \u043A\u043E\u0440\u043F\u0443\u0441\u0430 \u043F\u0440\u0438 \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u0439 \u043E\u0448\u0438\u0431\u043A\u0435.", kind: "protect", skillTags: ["engineering", "mechanic"], trainRiskDelta: -15 },
+    { id: "retreat", label: "\u041E\u0442\u0441\u0442\u0443\u043F\u0438\u0442\u044C", description: "\u0412\u044B\u0439\u0442\u0438 \u0438\u0437 \u0440\u0435\u0437\u043E\u043D\u0430\u043D\u0441\u043D\u043E\u0439 \u0437\u043E\u043D\u044B \u0434\u043E \u043A\u043E\u043B\u043B\u0430\u043F\u0441\u0430.", kind: "retreat" }
+  ], ["observation", "physics", "electronics-sensors", "engineering", "research"], ["\u043A\u043E\u0440\u043F\u0443\u0441", "\u0441\u0442\u0435\u043A\u043B\u043E", "\u0434\u0430\u0442\u0447\u0438\u043A\u0438", "\u043A\u0440\u0435\u043F\u043B\u0435\u043D\u0438\u044F \u0433\u0440\u0443\u0437\u0430"]),
+  full("echo-loop", "\u042D\u0445\u043E-\u043F\u0435\u0442\u043B\u044F", "canon-compatible", "echo", 3, "\u041F\u0440\u043E\u0441\u0442\u0440\u0430\u043D\u0441\u0442\u0432\u043E \u043F\u043E\u0432\u0442\u043E\u0440\u044F\u0435\u0442 \u0446\u0435\u043F\u043E\u0447\u043A\u0443 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0439 \u0441 \u0444\u0438\u043A\u0441\u0438\u0440\u043E\u0432\u0430\u043D\u043D\u043E\u0439 \u0437\u0430\u0434\u0435\u0440\u0436\u043A\u043E\u0439.", ["\u21BB \u041F\u043E\u0441\u043B\u0435\u0434\u043D\u0438\u0439 \u0437\u0432\u0443\u043A \u0432\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u0435\u0442\u0441\u044F \u0442\u0435\u043C \u0436\u0435 \u0440\u0438\u0442\u043C\u043E\u043C.", "\u25A1 \u0421\u043B\u0435\u0434\u044B \u043F\u043E\u044F\u0432\u043B\u044F\u044E\u0442\u0441\u044F \u043F\u043E\u0432\u0442\u043E\u0440\u043D\u043E \u0432 \u043F\u0440\u0435\u0436\u043D\u0438\u0445 \u043C\u0435\u0441\u0442\u0430\u0445.", "\u0422\u0435\u043A\u0441\u0442: \u043F\u0435\u0442\u043B\u044F \u043A\u043E\u043F\u0438\u0440\u0443\u0435\u0442 \u043F\u043E\u0440\u044F\u0434\u043E\u043A, \u043D\u043E \u043D\u0435 \u043D\u0430\u043C\u0435\u0440\u0435\u043D\u0438\u0435."], "echo-pattern", "\u041F\u0435\u0442\u043B\u044F \u0431\u0435\u0437\u043E\u043F\u0430\u0441\u043D\u043E \u0440\u0430\u0437\u043C\u044B\u043A\u0430\u0435\u0442\u0441\u044F \u043F\u0440\u043E\u0442\u0438\u0432\u043E\u043F\u043E\u043B\u043E\u0436\u043D\u043E\u0439 \u043F\u043E\u0441\u043B\u0435\u0434\u043E\u0432\u0430\u0442\u0435\u043B\u044C\u043D\u043E\u0441\u0442\u044C\u044E \u043A \u043D\u0430\u0431\u043B\u044E\u0434\u0430\u0435\u043C\u043E\u043C\u0443 \u044D\u0445\u0443.", [
+    { id: "record-echo", label: "\u0417\u0430\u043F\u0438\u0441\u0430\u0442\u044C \u044D\u0445\u043E", description: "\u041F\u043E\u043A\u0430\u0437\u0430\u0442\u044C \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0438\u0439 \u044D\u043B\u0435\u043C\u0435\u043D\u0442 \u043F\u043E\u0432\u0442\u043E\u0440\u044F\u0435\u043C\u043E\u0433\u043E \u043F\u0430\u0442\u0442\u0435\u0440\u043D\u0430.", kind: "observe", clue: "\u0420\u0430\u0437\u043C\u044B\u043A\u0430\u0439\u0442\u0435 \u043F\u0435\u0442\u043B\u044E \u0432 \u043E\u0431\u0440\u0430\u0442\u043D\u043E\u043C \u043F\u043E\u0440\u044F\u0434\u043A\u0435 \u043F\u043E\u043A\u0430\u0437\u0430\u043D\u043D\u044B\u0445 \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432.", skillTags: ["observation", "physics"], stabilityDelta: 4 },
+    { id: "echo-a", label: "\u0421\u0438\u0433\u043D\u0430\u043B \u25CB", description: "\u0412\u0432\u0435\u0441\u0442\u0438 \u043A\u0440\u0443\u0433\u043E\u0432\u043E\u0439 \u0441\u0438\u0433\u043D\u0430\u043B.", kind: "interact", advances: true },
+    { id: "echo-b", label: "\u0421\u0438\u0433\u043D\u0430\u043B \u25B3", description: "\u0412\u0432\u0435\u0441\u0442\u0438 \u0442\u0440\u0435\u0443\u0433\u043E\u043B\u044C\u043D\u044B\u0439 \u0441\u0438\u0433\u043D\u0430\u043B.", kind: "interact", advances: true },
+    { id: "echo-c", label: "\u0421\u0438\u0433\u043D\u0430\u043B \u25A1", description: "\u0412\u0432\u0435\u0441\u0442\u0438 \u043A\u0432\u0430\u0434\u0440\u0430\u0442\u043D\u044B\u0439 \u0441\u0438\u0433\u043D\u0430\u043B.", kind: "interact", advances: true },
+    { id: "anchor", label: "\u041E\u0441\u0442\u0430\u0432\u0438\u0442\u044C \u044F\u043A\u043E\u0440\u044C", description: "\u041F\u0440\u043E\u0441\u0442\u0438\u0442\u044C \u043E\u0434\u043D\u0443 \u043E\u0448\u0438\u0431\u043A\u0443 \u043F\u043E\u0441\u043B\u0435\u0434\u043E\u0432\u0430\u0442\u0435\u043B\u044C\u043D\u043E\u0441\u0442\u0438.", kind: "protect", skillTags: ["navigation", "engineering"], exposureDelta: -10 },
+    { id: "retreat", label: "\u041E\u0442\u0441\u0442\u0443\u043F\u0438\u0442\u044C", description: "\u041F\u043E\u0432\u0442\u043E\u0440\u0438\u0442\u044C \u0438\u0441\u0445\u043E\u0434\u043D\u044B\u0439 \u043F\u0443\u0442\u044C \u0434\u043E \u043A\u043E\u043B\u043B\u0430\u043F\u0441\u0430.", kind: "retreat" }
+  ], ["observation", "navigation", "physics", "research"], ["\u0445\u0440\u043E\u043D\u043E\u043C\u0435\u0442\u0440", "\u0441\u0432\u044F\u0437\u044C \u0432\u043D\u0443\u0442\u0440\u0438 \u043F\u043E\u0435\u0437\u0434\u0430", "\u043D\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u044F"]),
+  full("static-front", "\u0421\u0442\u0430\u0442\u0438\u0447\u0435\u0441\u043A\u0438\u0439 \u0444\u0440\u043E\u043D\u0442", "recommended", "electrical", 4, "\u0417\u0430\u0440\u044F\u0434 \u0438\u0434\u0451\u0442 \u043F\u043E \u043D\u0430\u0438\u0431\u043E\u043B\u0435\u0435 \u043F\u0440\u043E\u0432\u043E\u0434\u044F\u0449\u0435\u043C\u0443 \u043D\u0435\u043F\u0440\u0435\u0440\u044B\u0432\u043D\u043E\u043C\u0443 \u043F\u0443\u0442\u0438 \u0438 \u0437\u0430\u0440\u0430\u043D\u0435\u0435 \u043E\u0442\u043C\u0435\u0447\u0430\u0435\u0442 \u0435\u0433\u043E \u043A\u043E\u0440\u043E\u043D\u043D\u044B\u043C \u0441\u0432\u0435\u0447\u0435\u043D\u0438\u0435\u043C.", ["\u03DF \u041D\u0430 \u043E\u0441\u0442\u0440\u044B\u0445 \u0434\u0435\u0442\u0430\u043B\u044F\u0445 \u0432\u043E\u0437\u043D\u0438\u043A\u0430\u0435\u0442 \u043A\u043E\u0440\u043E\u043D\u043D\u043E\u0435 \u0441\u0432\u0435\u0447\u0435\u043D\u0438\u0435.", "\u23DA \u0417\u0435\u043C\u043B\u044F \u0438 \u043C\u043E\u043A\u0440\u044B\u0439 \u043C\u0435\u0442\u0430\u043B\u043B \u0433\u0443\u0434\u044F\u0442 \u043F\u0435\u0440\u0435\u0434 \u0440\u0430\u0437\u0440\u044F\u0434\u043E\u043C.", "\u0422\u0435\u043A\u0441\u0442: \u044F\u0440\u0447\u0435 \u0432\u0441\u0435\u0433\u043E \u0441\u0432\u0435\u0442\u0438\u0442\u0441\u044F \u0431\u0443\u0434\u0443\u0449\u0438\u0439 \u043F\u0443\u0442\u044C \u0442\u043E\u043A\u0430."], "network-routing", "\u041D\u0443\u0436\u043D\u043E \u0440\u0430\u0437\u043E\u0440\u0432\u0430\u0442\u044C \u043F\u0440\u043E\u0432\u043E\u0434\u044F\u0449\u0438\u0439 \u043F\u0443\u0442\u044C, \u0437\u0430\u0437\u0435\u043C\u043B\u0438\u0442\u044C \u0444\u0440\u043E\u043D\u0442 \u0438 \u043F\u0440\u043E\u0432\u0435\u0441\u0442\u0438 \u0442\u043E\u043B\u044C\u043A\u043E \u0438\u0437\u043E\u043B\u0438\u0440\u043E\u0432\u0430\u043D\u043D\u044B\u0439 \u0443\u0437\u0435\u043B.", [
+    { id: "scan-conductors", label: "\u041F\u0440\u043E\u0441\u043B\u0435\u0434\u0438\u0442\u044C \u0444\u0440\u043E\u043D\u0442", description: "\u041F\u043E\u043A\u0430\u0437\u0430\u0442\u044C \u043E\u043F\u0430\u0441\u043D\u044B\u0439 \u043F\u0440\u043E\u0432\u043E\u0434\u044F\u0449\u0438\u0439 \u0443\u0437\u0435\u043B.", kind: "observe", clue: "\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u0438\u0437\u043E\u043B\u0438\u0440\u0443\u0439\u0442\u0435 \u043E\u0442\u043C\u0435\u0447\u0435\u043D\u043D\u044B\u0439 \u0443\u0437\u0435\u043B, \u0437\u0430\u0442\u0435\u043C \u0437\u0430\u0437\u0435\u043C\u043B\u0438\u0442\u0435 \u0444\u0440\u043E\u043D\u0442.", skillTags: ["electronics-sensors", "physics"], stabilityDelta: 4 },
+    { id: "isolate-node", label: "\u0418\u0437\u043E\u043B\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0443\u0437\u0435\u043B", description: "\u0420\u0430\u0437\u043E\u0440\u0432\u0430\u0442\u044C \u043F\u043E\u0434\u0441\u0432\u0435\u0447\u0435\u043D\u043D\u044B\u0439 \u043F\u0440\u043E\u0432\u043E\u0434\u044F\u0449\u0438\u0439 \u043F\u0443\u0442\u044C.", kind: "protect", skillTags: ["electronics-sensors", "engineering"], advances: true, trainRiskDelta: -15 },
+    { id: "ground-front", label: "\u0417\u0430\u0437\u0435\u043C\u043B\u0438\u0442\u044C \u0444\u0440\u043E\u043D\u0442", description: "\u0421\u0431\u0440\u043E\u0441\u0438\u0442\u044C \u043D\u0430\u043A\u043E\u043F\u043B\u0435\u043D\u043D\u044B\u0439 \u0437\u0430\u0440\u044F\u0434 \u043F\u043E\u0441\u043B\u0435 \u0438\u0437\u043E\u043B\u044F\u0446\u0438\u0438.", kind: "interact", skillTags: ["electronics-sensors", "engineering"], advances: true, stabilityDelta: 15 },
+    { id: "cross-front", label: "\u041F\u0440\u043E\u0432\u0435\u0441\u0442\u0438 \u0438\u0437\u043E\u043B\u0438\u0440\u043E\u0432\u0430\u043D\u043D\u044B\u0439 \u0443\u0437\u0435\u043B", description: "\u041F\u0440\u043E\u0439\u0442\u0438 \u0444\u0440\u043E\u043D\u0442 \u043F\u043E\u0441\u043B\u0435 \u0440\u0430\u0437\u0440\u044B\u0432\u0430 \u043F\u0443\u0442\u0438 \u0438 \u0437\u0430\u0437\u0435\u043C\u043B\u0435\u043D\u0438\u044F.", kind: "train", skillTags: ["driving-locomotive", "engineering"], advances: true, trainRiskDelta: 5 },
+    { id: "power-down", label: "\u041E\u0431\u0435\u0441\u0442\u043E\u0447\u0438\u0442\u044C \u0432\u0430\u0433\u043E\u043D", description: "\u0423\u043C\u0435\u043D\u044C\u0448\u0438\u0442\u044C \u043F\u043E\u0441\u043B\u0435\u0434\u0441\u0442\u0432\u0438\u044F \u043E\u0448\u0438\u0431\u043A\u0438 \u0446\u0435\u043D\u043E\u0439 \u0432\u0440\u0435\u043C\u0435\u043D\u043D\u043E\u0433\u043E \u043E\u0442\u043A\u0430\u0437\u0430.", kind: "train", trainRiskDelta: -20 },
+    { id: "retreat", label: "\u041E\u0442\u0441\u0442\u0443\u043F\u0438\u0442\u044C", description: "\u041E\u0442\u043A\u0430\u0442\u0438\u0442\u044C\u0441\u044F \u0434\u043E \u0433\u0440\u0430\u043D\u0438\u0446\u044B \u043A\u043E\u0440\u043E\u043D\u043D\u043E\u0433\u043E \u0441\u0432\u0435\u0447\u0435\u043D\u0438\u044F.", kind: "retreat" }
+  ], ["observation", "physics", "electronics-sensors", "engineering", "mechanic"], ["\u044D\u043D\u0435\u0440\u0433\u043E\u0441\u0435\u0442\u044C", "\u0440\u0430\u0434\u0438\u043E\u0441\u0432\u044F\u0437\u044C", "\u0443\u043F\u0440\u0430\u0432\u043B\u0435\u043D\u0438\u0435 \u043B\u043E\u043A\u043E\u043C\u043E\u0442\u0438\u0432\u043E\u043C"]),
+  full("living-track", "\u0416\u0438\u0432\u043E\u0439 \u043F\u0443\u0442\u044C", "recommended", "railway", 4, "\u0420\u0435\u043B\u044C\u0441\u044B \u043F\u0435\u0440\u0435\u0441\u0442\u0440\u0430\u0438\u0432\u0430\u044E\u0442\u0441\u044F \u0432\u0441\u043B\u0435\u0434 \u0437\u0430 \u043D\u0430\u0433\u0440\u0443\u0437\u043A\u043E\u0439; \u0441\u0432\u043E\u0431\u043E\u0434\u043D\u0430\u044F \u0432\u0435\u0442\u043A\u0430 \u043F\u043E\u043A\u0430\u0437\u044B\u0432\u0430\u0435\u0442 \u0440\u0435\u0430\u043B\u044C\u043D\u043E\u0435 \u043D\u0430\u043F\u0440\u0430\u0432\u043B\u0435\u043D\u0438\u0435 \u0434\u043E \u043D\u0430\u0435\u0437\u0434\u0430.", ["\u224B \u041D\u0435\u043D\u0430\u0433\u0440\u0443\u0436\u0435\u043D\u043D\u044B\u0435 \u0440\u0435\u043B\u044C\u0441\u044B \u043C\u0435\u0434\u043B\u0435\u043D\u043D\u043E \u0438\u0437\u0433\u0438\u0431\u0430\u044E\u0442\u0441\u044F.", "\u21C6 \u0421\u0442\u0440\u0435\u043B\u043A\u0438 \u0434\u0451\u0440\u0433\u0430\u044E\u0442\u0441\u044F \u0432 \u0441\u0442\u043E\u0440\u043E\u043D\u0443 \u0441\u0432\u043E\u0431\u043E\u0434\u043D\u043E\u0439 \u0432\u0435\u0442\u043A\u0438.", "\u0422\u0435\u043A\u0441\u0442: \u043F\u0443\u0442\u044C \u043C\u0435\u043D\u044F\u0435\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u043F\u043E\u0441\u043B\u0435 \u043F\u0435\u0440\u0435\u043D\u043E\u0441\u0430 \u0432\u0435\u0441\u0430."], "track-routing", "\u0420\u0430\u0437\u0433\u0440\u0443\u0437\u0438\u0442\u0435 \u0432\u0435\u0434\u0443\u0449\u0443\u044E \u043E\u0441\u044C, \u0437\u0430\u0444\u0438\u043A\u0441\u0438\u0440\u0443\u0439\u0442\u0435 \u0432\u044B\u0431\u0440\u0430\u043D\u043D\u0443\u044E \u0432\u0435\u0442\u043A\u0443 \u0438 \u043F\u0440\u043E\u0445\u043E\u0434\u0438\u0442\u0435 \u043D\u0430 \u043C\u0430\u043B\u043E\u0439 \u0442\u044F\u0433\u0435 \u0431\u0435\u0437 \u0440\u0435\u0437\u043A\u043E\u0433\u043E \u0442\u043E\u0440\u043C\u043E\u0436\u0435\u043D\u0438\u044F.", [
+    { id: "inspect-switch", label: "\u041D\u0430\u0431\u043B\u044E\u0434\u0430\u0442\u044C \u0441\u0442\u0440\u0435\u043B\u043A\u0438", description: "\u041F\u043E\u043A\u0430\u0437\u0430\u0442\u044C \u0432\u0435\u0442\u043A\u0443, \u043A\u043E\u0442\u043E\u0440\u0430\u044F \u043E\u0441\u0442\u0430\u043D\u0435\u0442\u0441\u044F \u0441\u0442\u0430\u0431\u0438\u043B\u044C\u043D\u043E\u0439 \u043F\u043E\u0434 \u043D\u0430\u0433\u0440\u0443\u0437\u043A\u043E\u0439.", kind: "observe", clue: "\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u0440\u0430\u0437\u0433\u0440\u0443\u0437\u0438\u0442\u0435 \u043E\u0441\u044C, \u0437\u0430\u0442\u0435\u043C \u0444\u0438\u043A\u0441\u0438\u0440\u0443\u0439\u0442\u0435 \u043F\u043E\u043A\u0430\u0437\u0430\u043D\u043D\u0443\u044E \u0432\u0435\u0442\u043A\u0443.", skillTags: ["observation", "mechanic", "driving-locomotive"], stabilityDelta: 4 },
+    { id: "unload-axle", label: "\u0420\u0430\u0437\u0433\u0440\u0443\u0437\u0438\u0442\u044C \u0432\u0435\u0434\u0443\u0449\u0443\u044E \u043E\u0441\u044C", description: "\u041F\u0435\u0440\u0435\u0440\u0430\u0441\u043F\u0440\u0435\u0434\u0435\u043B\u0438\u0442\u044C \u0433\u0440\u0443\u0437 \u043F\u0435\u0440\u0435\u0434 \u0444\u0438\u043A\u0441\u0430\u0446\u0438\u0435\u0439 \u043F\u0443\u0442\u0438.", kind: "train", skillTags: ["mechanic", "engineering"], advances: true, trainRiskDelta: -10 },
+    { id: "lock-switch", label: "\u0417\u0430\u0444\u0438\u043A\u0441\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0432\u0435\u0442\u043A\u0443", description: "\u041C\u0435\u0445\u0430\u043D\u0438\u0447\u0435\u0441\u043A\u0438 \u0443\u0434\u0435\u0440\u0436\u0430\u0442\u044C \u043F\u043E\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043D\u043D\u043E\u0435 \u043D\u0430\u043F\u0440\u0430\u0432\u043B\u0435\u043D\u0438\u0435.", kind: "interact", skillTags: ["mechanic", "engineering"], advances: true, stabilityDelta: 16 },
+    { id: "crawl", label: "\u041C\u0430\u043B\u0430\u044F \u0442\u044F\u0433\u0430", description: "\u041F\u0440\u043E\u0439\u0442\u0438 \u0431\u0435\u0437 \u0440\u044B\u0432\u043A\u0430 \u043F\u043E\u0441\u043B\u0435 \u043F\u043E\u0434\u0433\u043E\u0442\u043E\u0432\u043A\u0438.", kind: "train", skillTags: ["driving-locomotive"], advances: true, trainRiskDelta: 4 },
+    { id: "drop-cargo", label: "\u0421\u0431\u0440\u043E\u0441\u0438\u0442\u044C \u0433\u0440\u0443\u0437", description: "\u0421\u043D\u0438\u0437\u0438\u0442\u044C \u0440\u0438\u0441\u043A \u0446\u0435\u043D\u043E\u0439 \u0447\u0430\u0441\u0442\u0438 \u0433\u0440\u0443\u0437\u0430.", kind: "protect", trainRiskDelta: -25 },
+    { id: "retreat", label: "\u041E\u0442\u0441\u0442\u0443\u043F\u0438\u0442\u044C", description: "\u041E\u0442\u043A\u0430\u0442\u0438\u0442\u044C\u0441\u044F \u0431\u0435\u0437 \u0441\u043C\u0435\u043D\u044B \u043D\u0430\u0433\u0440\u0443\u0437\u043A\u0438 \u0434\u043E \u043A\u043E\u043B\u043B\u0430\u043F\u0441\u0430.", kind: "retreat" }
+  ], ["observation", "navigation", "engineering", "mechanic", "driving-locomotive"], ["\u043A\u043E\u043B\u0451\u0441\u043D\u044B\u0435 \u043F\u0430\u0440\u044B", "\u0441\u0442\u0440\u0435\u043B\u043A\u0438", "\u0442\u043E\u0440\u043C\u043E\u0437\u0430", "\u0441\u0446\u0435\u043F\u043A\u0438"]),
+  definition({ id: "druse-growth", name: "\u0420\u043E\u0441\u0442 \u0434\u0440\u0443\u0437\u044B", description: "\u041A\u0440\u0438\u0441\u0442\u0430\u043B\u043B\u0438\u0447\u0435\u0441\u043A\u0430\u044F \u043A\u043E\u043B\u043E\u043D\u0438\u044F \u043D\u0430\u0440\u0430\u0449\u0438\u0432\u0430\u0435\u0442 \u043C\u0430\u0441\u0441\u0443 \u0432\u0434\u043E\u043B\u044C \u0442\u0435\u043F\u043B\u043E\u0432\u044B\u0445 \u043C\u043E\u0441\u0442\u043E\u0432.", canonStatus: "canon-compatible", family: "crystalline", dangerTier: 2, warningSigns: ["\u25C7 \u0418\u043D\u0435\u0439 \u043E\u0431\u0440\u0430\u0437\u0443\u0435\u0442 \u0432\u0435\u0442\u0432\u044F\u0449\u0438\u0439\u0441\u044F \u0440\u0438\u0441\u0443\u043D\u043E\u043A.", "\u0422\u0435\u043A\u0441\u0442: \u0440\u043E\u0441\u0442 \u0441\u043B\u0435\u0434\u0443\u0435\u0442 \u043A \u0441\u0430\u043C\u043E\u043C\u0443 \u0442\u0451\u043F\u043B\u043E\u043C\u0443 \u043C\u0435\u0442\u0430\u043B\u043B\u0443."], gurpsResolution: { requiredSuccesses: 3, allowedSkillTags: ["observation", "physics", "chemistry", "engineering"], defaultPenalty: -1, criticalSuccessMayAutoResolve: false }, trainConsequences: train(["\u0442\u0435\u043F\u043B\u043E\u0442\u0440\u0430\u0441\u0441\u0430", "\u043E\u0431\u0448\u0438\u0432\u043A\u0430"], "\u0440\u043E\u0441\u0442 \u0434\u0440\u0443\u0437\u044B") }),
+  definition({ id: "reflection-field", name: "\u041F\u043E\u043B\u0435 \u043E\u0442\u0440\u0430\u0436\u0435\u043D\u0438\u0439", description: "\u041E\u0442\u0440\u0430\u0436\u0430\u0435\u0442 \u043D\u0430\u043F\u0440\u0430\u0432\u043B\u0435\u043D\u043D\u043E\u0435 \u0432\u043E\u0437\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435 \u043F\u043E \u043D\u0430\u0431\u043B\u044E\u0434\u0430\u0435\u043C\u043E\u0439 \u0433\u0435\u043E\u043C\u0435\u0442\u0440\u0438\u0438 \u043F\u043E\u0432\u0435\u0440\u0445\u043D\u043E\u0441\u0442\u0435\u0439.", canonStatus: "canon-compatible", family: "reflection", dangerTier: 3, warningSigns: ["\u25C7 \u041E\u0442\u0440\u0430\u0436\u0435\u043D\u0438\u044F \u0437\u0430\u043F\u0430\u0437\u0434\u044B\u0432\u0430\u044E\u0442 \u043D\u0430 \u043E\u0434\u0438\u043D \u0436\u0435\u0441\u0442.", "\u0422\u0435\u043A\u0441\u0442: \u043C\u0430\u0442\u043E\u0432\u0430\u044F \u043F\u043E\u0432\u0435\u0440\u0445\u043D\u043E\u0441\u0442\u044C \u043D\u0435 \u0434\u0430\u0451\u0442 \u0432\u0442\u043E\u0440\u0438\u0447\u043D\u043E\u0433\u043E \u043E\u0431\u0440\u0430\u0437\u0430."], gurpsResolution: { requiredSuccesses: 3, allowedSkillTags: ["observation", "physics", "navigation"], defaultPenalty: -2, criticalSuccessMayAutoResolve: false }, trainConsequences: train(["\u043E\u043F\u0442\u0438\u043A\u0430", "\u043F\u0440\u043E\u0436\u0435\u043A\u0442\u043E\u0440\u044B", "\u043D\u0430\u0431\u043B\u044E\u0434\u0430\u0442\u0435\u043B\u044C\u043D\u044B\u0439 \u043F\u043E\u0441\u0442"], "\u043B\u043E\u0436\u043D\u044B\u0435 \u043E\u0442\u0440\u0430\u0436\u0435\u043D\u0438\u044F") }),
+  definition({ id: "gravity-fracture", name: "\u0413\u0440\u0430\u0432\u0438\u0442\u0430\u0446\u0438\u043E\u043D\u043D\u044B\u0439 \u0440\u0430\u0437\u043B\u043E\u043C", description: "\u0412\u0435\u043A\u0442\u043E\u0440 \u0442\u044F\u0436\u0435\u0441\u0442\u0438 \u0441\u0442\u0443\u043F\u0435\u043D\u0447\u0430\u0442\u043E \u043C\u0435\u043D\u044F\u0435\u0442\u0441\u044F \u043C\u0435\u0436\u0434\u0443 \u0432\u0438\u0434\u0438\u043C\u044B\u043C\u0438 \u0441\u043B\u043E\u044F\u043C\u0438 \u043F\u044B\u043B\u0438.", canonStatus: "recommended", family: "gravitational", dangerTier: 4, warningSigns: ["\u2193 \u041F\u044B\u043B\u044C \u043F\u0430\u0434\u0430\u0435\u0442 \u0432 \u0440\u0430\u0437\u043D\u044B\u0435 \u0441\u0442\u043E\u0440\u043E\u043D\u044B \u043F\u043E \u043F\u043E\u043B\u043E\u0441\u0430\u043C.", "\u0422\u0435\u043A\u0441\u0442: \u0433\u0440\u0430\u043D\u0438\u0446\u044B \u0432\u0435\u043A\u0442\u043E\u0440\u0430 \u043D\u0435\u043F\u043E\u0434\u0432\u0438\u0436\u043D\u044B \u043D\u0435\u0441\u043A\u043E\u043B\u044C\u043A\u043E \u043C\u0438\u043D\u0443\u0442."], gurpsResolution: { requiredSuccesses: 4, allowedSkillTags: ["observation", "physics", "engineering", "driving-locomotive"], defaultPenalty: -3, criticalSuccessMayAutoResolve: false }, trainConsequences: train(["\u043F\u043E\u0434\u0432\u0435\u0441\u043A\u0430", "\u043A\u0440\u0435\u043F\u043B\u0435\u043D\u0438\u044F \u0433\u0440\u0443\u0437\u0430"], "\u0441\u043C\u0435\u043D\u0430 \u0432\u0435\u043A\u0442\u043E\u0440\u0430 \u0442\u044F\u0436\u0435\u0441\u0442\u0438") }),
+  definition({ id: "spatial-seam", name: "\u041F\u0440\u043E\u0441\u0442\u0440\u0430\u043D\u0441\u0442\u0432\u0435\u043D\u043D\u044B\u0439 \u0448\u043E\u0432", description: "\u0421\u0448\u0438\u0432\u0430\u0435\u0442 \u0434\u0432\u0435 \u043D\u0430\u0431\u043B\u044E\u0434\u0430\u0435\u043C\u044B\u0435 \u0433\u0440\u0430\u043D\u0438\u0446\u044B \u043F\u0440\u043E\u0441\u0442\u0440\u0430\u043D\u0441\u0442\u0432\u0430 \u0441 \u043F\u043E\u0441\u0442\u043E\u044F\u043D\u043D\u043E\u0439 \u043E\u0440\u0438\u0435\u043D\u0442\u0430\u0446\u0438\u0435\u0439.", canonStatus: "recommended", family: "spatial", dangerTier: 4, warningSigns: ["\u2551 \u041F\u0440\u044F\u043C\u044B\u0435 \u043B\u0438\u043D\u0438\u0438 \u043E\u0431\u0440\u044B\u0432\u0430\u044E\u0442\u0441\u044F \u0438 \u043F\u0440\u043E\u0434\u043E\u043B\u0436\u0430\u044E\u0442\u0441\u044F \u0441\u043E \u0441\u043C\u0435\u0449\u0435\u043D\u0438\u0435\u043C.", "\u0422\u0435\u043A\u0441\u0442: \u0448\u043E\u0432 \u0441\u043E\u0445\u0440\u0430\u043D\u044F\u0435\u0442 \u043E\u0440\u0438\u0435\u043D\u0442\u0430\u0446\u0438\u044E \u0434\u043E \u043A\u043E\u043B\u043B\u0430\u043F\u0441\u0430."], gurpsResolution: { requiredSuccesses: 4, allowedSkillTags: ["observation", "navigation", "physics"], defaultPenalty: -3, criticalSuccessMayAutoResolve: false }, trainConsequences: train(["\u0433\u0430\u0431\u0430\u0440\u0438\u0442 \u0441\u043E\u0441\u0442\u0430\u0432\u0430", "\u0441\u0446\u0435\u043F\u043A\u0438"], "\u043F\u0440\u043E\u0441\u0442\u0440\u0430\u043D\u0441\u0442\u0432\u0435\u043D\u043D\u043E\u0435 \u0441\u043C\u0435\u0449\u0435\u043D\u0438\u0435") }),
+  definition({ id: "silent-zone", name: "\u041D\u0435\u043C\u0430\u044F \u0437\u043E\u043D\u0430", description: "\u041B\u043E\u043A\u0430\u043B\u044C\u043D\u043E \u043F\u043E\u0434\u0430\u0432\u043B\u044F\u0435\u0442 \u0441\u0438\u0433\u043D\u0430\u043B\u044B \u0438\u043D\u0442\u0435\u0440\u0444\u0435\u0439\u0441\u0430, \u043D\u043E \u043D\u0438\u043A\u043E\u0433\u0434\u0430 \u043D\u0435 \u0431\u043B\u043E\u043A\u0438\u0440\u0443\u0435\u0442 \u0440\u0435\u0430\u043B\u044C\u043D\u044B\u0439 \u0447\u0430\u0442 Foundry.", canonStatus: "recommended", family: "resonance", dangerTier: 2, warningSigns: ["\u2205 \u0418\u043D\u0434\u0438\u043A\u0430\u0442\u043E\u0440\u044B \u0441\u0432\u044F\u0437\u0438 \u0433\u0430\u0441\u043D\u0443\u0442 \u043F\u043E \u043E\u0447\u0435\u0440\u0435\u0434\u0438.", "\u0422\u0435\u043A\u0441\u0442: \u043C\u0435\u0445\u0430\u043D\u0438\u0447\u0435\u0441\u043A\u0438\u0435 \u0441\u0438\u0433\u043D\u0430\u043B\u044B \u043F\u0440\u043E\u0434\u043E\u043B\u0436\u0430\u044E\u0442 \u0440\u0430\u0431\u043E\u0442\u0430\u0442\u044C."], gurpsResolution: { requiredSuccesses: 3, allowedSkillTags: ["observation", "electronics-sensors", "engineering"], defaultPenalty: -1, criticalSuccessMayAutoResolve: false }, trainConsequences: train(["\u0432\u043D\u0443\u0442\u0440\u0435\u043D\u043D\u044F\u044F \u0441\u0432\u044F\u0437\u044C", "\u0434\u0430\u0442\u0447\u0438\u043A\u0438"], "\u043F\u043E\u0434\u0430\u0432\u043B\u0435\u043D\u0438\u0435 \u0438\u043D\u0442\u0435\u0440\u0444\u0435\u0439\u0441\u043D\u043E\u0439 \u0441\u0432\u044F\u0437\u0438"), gmNotes: ["\u041E\u0433\u0440\u0430\u043D\u0438\u0447\u0435\u043D\u0438\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0443\u0435\u0442 \u0442\u043E\u043B\u044C\u043A\u043E \u0432\u043D\u0443\u0442\u0440\u0438 \u043C\u0438\u043D\u0438-\u0438\u0433\u0440\u044B \u0438 \u043E\u0442\u043A\u043B\u044E\u0447\u0430\u0435\u0442\u0441\u044F GM.", "\u041D\u0435 \u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0447\u0430\u0442 Foundry, \u0433\u043E\u043B\u043E\u0441 \u0438\u043B\u0438 \u0434\u043E\u0441\u0442\u0443\u043F\u043D\u043E\u0441\u0442\u044C \u0438\u043D\u0442\u0435\u0440\u0444\u0435\u0439\u0441\u0430."] }),
+  definition({ id: "thermal-pocket", name: "\u0422\u0435\u043F\u043B\u043E\u0432\u043E\u0439 \u043A\u0430\u0440\u043C\u0430\u043D", description: "\u0422\u0435\u043F\u043B\u043E \u043F\u0435\u0440\u0435\u0442\u0435\u043A\u0430\u0435\u0442 \u043C\u0435\u0436\u0434\u0443 \u0437\u0430\u0440\u0430\u043D\u0435\u0435 \u0437\u0430\u043C\u0435\u0442\u043D\u044B\u043C\u0438 \u0445\u043E\u043B\u043E\u0434\u043D\u044B\u043C\u0438 \u0438 \u0433\u043E\u0440\u044F\u0447\u0438\u043C\u0438 \u0443\u0437\u043B\u0430\u043C\u0438.", canonStatus: "recommended", family: "thermal", dangerTier: 3, warningSigns: ["\u25B3 \u041A\u043E\u043D\u0434\u0435\u043D\u0441\u0430\u0442 \u043E\u0431\u0440\u0430\u0437\u0443\u0435\u0442 \u043A\u043E\u043B\u044C\u0446\u0430 \u0432\u043E\u043A\u0440\u0443\u0433 \u0445\u043E\u043B\u043E\u0434\u043D\u044B\u0445 \u0443\u0437\u043B\u043E\u0432.", "\u0422\u0435\u043A\u0441\u0442: \u0433\u043E\u0440\u044F\u0447\u0430\u044F \u0437\u043E\u043D\u0430 \u0440\u0430\u0441\u0448\u0438\u0440\u044F\u0435\u0442\u0441\u044F \u043F\u043E\u0441\u043B\u0435 \u0440\u0435\u0437\u043A\u043E\u0433\u043E \u043F\u0440\u0438\u0442\u043E\u043A\u0430 \u0432\u043E\u0437\u0434\u0443\u0445\u0430."], gurpsResolution: { requiredSuccesses: 3, allowedSkillTags: ["observation", "physics", "engineering", "survival"], defaultPenalty: -2, criticalSuccessMayAutoResolve: false }, trainConsequences: train(["\u043E\u0445\u043B\u0430\u0436\u0434\u0435\u043D\u0438\u0435", "\u043A\u043E\u0442\u0451\u043B", "\u0442\u043E\u043F\u043B\u0438\u0432\u043D\u0430\u044F \u043C\u0430\u0433\u0438\u0441\u0442\u0440\u0430\u043B\u044C"], "\u0442\u0435\u043F\u043B\u043E\u0432\u043E\u0439 \u043F\u0435\u0440\u0435\u043F\u0430\u0434") }),
+  definition({ id: "memory-haze", name: "\u0422\u0443\u043C\u0430\u043D \u043F\u0430\u043C\u044F\u0442\u0438", description: "\u0421\u0442\u0438\u0440\u0430\u0435\u0442 \u043A\u0440\u0430\u0442\u043A\u0443\u044E \u043F\u043E\u0441\u043B\u0435\u0434\u043E\u0432\u0430\u0442\u0435\u043B\u044C\u043D\u043E\u0441\u0442\u044C \u0440\u0435\u0448\u0435\u043D\u0438\u0439, \u043E\u0441\u0442\u0430\u0432\u043B\u044F\u044F \u0432\u043D\u0435\u0448\u043D\u0438\u0435 \u0437\u0430\u043F\u0438\u0441\u0438 \u043D\u0435\u0442\u0440\u043E\u043D\u0443\u0442\u044B\u043C\u0438.", canonStatus: "recommended", family: "cognitive", dangerTier: 3, warningSigns: ["\u2026 \u041F\u043E\u0432\u0442\u043E\u0440\u044F\u044E\u0442\u0441\u044F \u043D\u0435\u0437\u0430\u043A\u043E\u043D\u0447\u0435\u043D\u043D\u044B\u0435 \u0444\u0440\u0430\u0437\u044B.", "\u0422\u0435\u043A\u0441\u0442: \u043F\u0438\u0441\u044C\u043C\u0435\u043D\u043D\u044B\u0435 \u043C\u0435\u0442\u043A\u0438 \u043D\u0435 \u043C\u0435\u043D\u044F\u044E\u0442\u0441\u044F \u0432\u043C\u0435\u0441\u0442\u0435 \u0441 \u043F\u0430\u043C\u044F\u0442\u044C\u044E."], gurpsResolution: { requiredSuccesses: 3, allowedSkillTags: ["observation", "research", "first-aid"], defaultPenalty: -2, criticalSuccessMayAutoResolve: false }, trainConsequences: train(["\u0432\u0430\u0445\u0442\u0435\u043D\u043D\u044B\u0439 \u0436\u0443\u0440\u043D\u0430\u043B", "\u043D\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043E\u043D\u043D\u044B\u0435 \u043F\u0440\u043E\u0446\u0435\u0434\u0443\u0440\u044B"], "\u043F\u043E\u0442\u0435\u0440\u044F \u043A\u0440\u0430\u0442\u043A\u043E\u0439 \u043F\u0430\u043C\u044F\u0442\u0438") }),
+  definition({ id: "rust-wave", name: "\u0412\u043E\u043B\u043D\u0430 \u0440\u0436\u0430\u0432\u0447\u0438\u043D\u044B", description: "\u041A\u043E\u0440\u0440\u043E\u0437\u0438\u043E\u043D\u043D\u044B\u0439 \u0444\u0440\u043E\u043D\u0442 \u0438\u0434\u0451\u0442 \u043F\u043E \u044D\u043B\u0435\u043A\u0442\u0440\u0438\u0447\u0435\u0441\u043A\u0438 \u0441\u0432\u044F\u0437\u0430\u043D\u043D\u043E\u043C\u0443 \u043C\u0435\u0442\u0430\u043B\u043B\u0443.", canonStatus: "recommended", family: "corrosive", dangerTier: 4, warningSigns: ["\u224B \u041E\u043A\u0438\u0441\u0435\u043B \u0440\u0430\u0441\u0442\u0451\u0442 \u043B\u0438\u043D\u0438\u0435\u0439 \u043E\u0442 \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u0430 \u043A \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u0443.", "\u0422\u0435\u043A\u0441\u0442: \u0438\u0437\u043E\u043B\u0438\u0440\u0443\u044E\u0449\u0438\u0435 \u0432\u0441\u0442\u0430\u0432\u043A\u0438 \u043E\u0441\u0442\u0430\u043D\u0430\u0432\u043B\u0438\u0432\u0430\u044E\u0442 \u0444\u0440\u043E\u043D\u0442."], gurpsResolution: { requiredSuccesses: 4, allowedSkillTags: ["observation", "chemistry", "engineering", "mechanic"], defaultPenalty: -3, criticalSuccessMayAutoResolve: false }, trainConsequences: train(["\u043E\u0431\u0448\u0438\u0432\u043A\u0430", "\u0442\u043E\u0440\u043C\u043E\u0437\u043D\u044B\u0435 \u043C\u0430\u0433\u0438\u0441\u0442\u0440\u0430\u043B\u0438", "\u043A\u0440\u0435\u043F\u0451\u0436"], "\u0443\u0441\u043A\u043E\u0440\u0435\u043D\u043D\u0430\u044F \u043A\u043E\u0440\u0440\u043E\u0437\u0438\u044F") }),
+  definition({ id: "eon-storm", name: "\u042D\u043E\u043D\u043E\u0432\u044B\u0439 \u0448\u0442\u043E\u0440\u043C", description: "\u0412\u044B\u0441\u043E\u043A\u043E\u0443\u0440\u043E\u0432\u043D\u0435\u0432\u043E\u0435 \u0441\u043E\u0441\u0442\u0430\u0432\u043D\u043E\u0435 \u0441\u043E\u0431\u044B\u0442\u0438\u0435, \u0441\u0432\u044F\u0437\u044B\u0432\u0430\u044E\u0449\u0435\u0435 \u043D\u0435\u0441\u043A\u043E\u043B\u044C\u043A\u043E \u0437\u0430\u043A\u043E\u043D\u043E\u0432 \u042D\u041E\u041D.", canonStatus: "recommended", family: "composite", dangerTier: 5, warningSigns: ["\u2726 \u041D\u0435\u0441\u043A\u043E\u043B\u044C\u043A\u043E \u043D\u0435\u0437\u0430\u0432\u0438\u0441\u0438\u043C\u044B\u0445 \u043F\u0440\u0438\u0431\u043E\u0440\u043E\u0432 \u043F\u043E\u0432\u0442\u043E\u0440\u044F\u044E\u0442 \u043E\u0434\u0438\u043D \u0440\u0438\u0442\u043C.", "\u0422\u0435\u043A\u0441\u0442: \u0444\u0440\u043E\u043D\u0442 \u043F\u0440\u0438\u0431\u043B\u0438\u0436\u0430\u0435\u0442\u0441\u044F \u0441\u0442\u0430\u0434\u0438\u044F\u043C\u0438 \u0438 \u0434\u043E\u043F\u0443\u0441\u043A\u0430\u0435\u0442 \u043F\u043E\u0434\u0433\u043E\u0442\u043E\u0432\u043A\u0443."], supportedModes: ["exploration", "combat", "train-travel", "train-combat", "research"], gurpsResolution: { requiredSuccesses: 5, allowedSkillTags: ["observation", "navigation", "physics", "electronics-sensors", "engineering", "mechanic", "driving-locomotive", "research"], defaultPenalty: -4, criticalSuccessMayAutoResolve: false }, trainConsequences: train(["\u044D\u043D\u0435\u0440\u0433\u043E\u0441\u0435\u0442\u044C", "\u0445\u043E\u0434\u043E\u0432\u0430\u044F \u0447\u0430\u0441\u0442\u044C", "\u0441\u0432\u044F\u0437\u044C", "\u043A\u043E\u0440\u043F\u0443\u0441"], "\u043A\u043E\u043C\u043F\u043B\u0435\u043A\u0441\u043D\u044B\u0439 \u042D\u043E\u043D\u043E\u0432\u044B\u0439 \u0448\u0442\u043E\u0440\u043C"), gmNotes: ["\u0415\u0434\u0438\u043D\u0441\u0442\u0432\u0435\u043D\u043D\u043E\u0435 \u0431\u0430\u0437\u043E\u0432\u043E\u0435 \u0441\u043E\u0431\u044B\u0442\u0438\u0435, \u0441\u043F\u043E\u0441\u043E\u0431\u043D\u043E\u0435 \u0437\u0430\u0442\u0440\u043E\u043D\u0443\u0442\u044C \u043D\u0435\u0441\u043A\u043E\u043B\u044C\u043A\u043E \u0432\u0430\u0433\u043E\u043D\u043E\u0432 \u043E\u0434\u043D\u043E\u0432\u0440\u0435\u043C\u0435\u043D\u043D\u043E.", "\u041A\u0440\u0438\u0442\u0438\u0447\u0435\u0441\u043A\u0438\u0435 \u043F\u043E\u0441\u043B\u0435\u0434\u0441\u0442\u0432\u0438\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u043F\u043E\u0441\u043B\u0435 \u043F\u0440\u0435\u0434\u0443\u043F\u0440\u0435\u0436\u0434\u0435\u043D\u0438\u0439, \u043E\u0448\u0438\u0431\u043E\u043A \u0438\u043B\u0438 \u0434\u043E\u0431\u0440\u043E\u0432\u043E\u043B\u044C\u043D\u043E\u0433\u043E \u0440\u0438\u0441\u043A\u0430."] })
+];
+var ANOMALY_BY_ID = Object.fromEntries(ANOMALY_DEFINITIONS.map((item) => [item.id, item]));
+var ANOMALY_IDS = ANOMALY_DEFINITIONS.map((item) => item.id);
+
+// server.ts
 var app = (0, import_express.default)();
 var server = import_http.default.createServer(app);
 var wss = new import_ws.WebSocketServer({ server });
@@ -179,7 +459,7 @@ function resolveCellEnter(nx, ny) {
     appendSystemMessage(`\u2623\uFE0F \u0412\u043D\u0438\u043C\u0430\u043D\u0438\u0435! \u0414\u043E\u0437\u0430 \u043E\u0431\u043B\u0443\u0447\u0435\u043D\u0438\u044F: +${dose} \u0440\u0430\u0434 (\u0422\u0435\u043A: ${map.radiation}/${map.maxRadiation})!`, "warning");
     const radDmg = cell.radiationLevel * 6;
     map.health = Math.max(0, map.health - radDmg);
-    appendSystemMessage(`\u{1F494} \u0417\u0434\u043E\u0440\u043E\u0432\u044C\u0435 \u043E\u0442\u0440\u044F\u0434\u0430 \u0441\u043D\u0438\u0437\u0438\u043B\u043E\u0441\u044C \u043D\u0430 -${radDmg} HP \u0438\u0437-\u0437\u0430 \u0444\u043E\u043D\u0438\u0440\u0443\u044E\u0449\u0438\u0445 \u043E\u0447\u0430\u0433\u043E\u0432 \u0440\u0430\u0434\u0438\u0430\u0446\u0438\u0438.`, "danger");
+    appendSystemMessage(`\u{1F494} \u0417\u0434\u043E\u0440\u043E\u0432\u044C\u0435 \u043E\u0442\u0440\u044F\u0434\u0430 \u0441\u043D\u0438\u0437\u0438\u043B\u043E\u0441\u044C \u043D\u0430 ${radDmg} \u041E\u0417 \u0438\u0437-\u0437\u0430 \u0444\u043E\u043D\u0438\u0440\u0443\u044E\u0449\u0438\u0445 \u043E\u0447\u0430\u0433\u043E\u0432 \u0440\u0430\u0434\u0438\u0430\u0446\u0438\u0438.`, "danger");
   }
   if (cell.type === "exit") {
     appendSystemMessage("\u{1F3C6} \u041F\u043E\u0437\u0434\u0440\u0430\u0432\u043B\u044F\u0435\u043C! \u0413\u0440\u0443\u043F\u043F\u0430 \u0443\u0441\u043F\u0435\u0448\u043D\u043E \u043F\u0440\u0435\u043E\u0434\u043E\u043B\u0435\u043B\u0430 \u043A\u043E\u0440\u0434\u043E\u043D\u044B \u0438 \u043F\u043E\u043A\u0438\u043D\u0443\u043B\u0430 \u0430\u043D\u043E\u043C\u0430\u043B\u044C\u043D\u0443\u044E \u0437\u043E\u043D\u0443!", "success");
@@ -205,86 +485,203 @@ function resolveCellEnter(nx, ny) {
     map.grid[ny][nx].type = "empty";
   }
   if (cell.type === "anomaly") {
-    const name = cell.anomalyType;
-    if (name === "fire") {
-      map.health = Math.max(0, map.health - 25);
-      appendSystemMessage("\u{1F525} \u0416\u0410\u0420\u041A\u0410! \u041E\u0433\u043D\u0435\u043D\u043D\u044B\u0439 \u0441\u0442\u043E\u043B\u0431 \u0441\u0436\u0438\u0433\u0430\u0435\u0442 \u0441\u043D\u0430\u0440\u044F\u0436\u0435\u043D\u0438\u0435: -25HP \u0443 \u0432\u0441\u0435\u0439 \u0433\u0440\u0443\u043F\u043F\u044B!", "danger");
-    } else if (name === "trampoline") {
-      map.health = Math.max(0, map.health - 20);
-      appendSystemMessage("\u{1F4A8} \u0422\u0420\u0410\u041C\u041F\u041B\u0418\u041D! \u0421\u0442\u043E\u043B\u043A\u043D\u043E\u0432\u0435\u043D\u0438\u0435 \u0441\u0436\u0430\u0442\u043E\u0433\u043E \u0432\u043E\u0437\u0434\u0443\u0445\u0430 \u0448\u0432\u044B\u0440\u044F\u0435\u0442 \u0433\u0440\u0443\u043F\u043F\u0443: -20HP! \u0421\u043B\u0443\u0447\u0430\u0439\u043D\u0430\u044F \u0442\u0435\u043B\u0435\u043F\u043E\u0440\u0442\u0430\u0446\u0438\u044F...", "danger");
-      const tx = Math.floor(Math.random() * map.width);
-      const ty = Math.floor(Math.random() * map.height);
-      map.playerPos = { x: tx, y: ty };
-      resolveCellEnter(tx, ty);
-    } else if (name === "sphere") {
-      map.health = Math.max(0, map.health - 30);
-      appendSystemMessage("\u{1FAE7} \u0413\u0420\u0410\u0412\u0418-\u0421\u0424\u0415\u0420\u0410! \u0421\u0434\u0430\u0432\u043B\u0438\u0432\u0430\u044E\u0449\u0438\u0439 \u043A\u0443\u043F\u043E\u043B \u043D\u0430\u043D\u043E\u0441\u0438\u0442 \u0442\u044F\u0436\u0435\u043B\u044B\u0435 \u0443\u0432\u0435\u0447\u044C\u044F: -30HP!", "danger");
-      if (!cell.hasExpanded) {
-        cell.hasExpanded = true;
-        const adj = [
-          { dx: 1, dy: 0 },
-          { dx: -1, dy: 0 },
-          { dx: 0, dy: 1 },
-          { dx: 0, dy: -1 },
-          { dx: 1, dy: 1 },
-          { dx: -1, dy: -1 },
-          { dx: 1, dy: -1 },
-          { dx: -1, dy: 1 }
-        ];
-        adj.forEach((d) => {
-          const ax = nx + d.dx;
-          const ay = ny + d.dy;
-          if (ax >= 0 && ax < map.width && ay >= 0 && ay < map.height) {
-            if (map.grid[ay][ax].type === "empty") {
-              map.grid[ay][ax] = {
-                ...map.grid[ay][ax],
-                type: "anomaly",
-                anomalyType: "sphere",
-                isRevealed: true,
-                hasExpanded: true
-              };
-            }
-          }
-        });
-        appendSystemMessage("\u{1FAE7} \u0410\u043D\u043E\u043C\u0430\u043B\u0438\u044F \u0421\u0444\u0435\u0440\u0430 \u0434\u0435\u0442\u043E\u043D\u0438\u0440\u043E\u0432\u0430\u043B\u0430 \u0438 \u0440\u0430\u0441\u0448\u0438\u0440\u0438\u043B\u0430 \u0441\u043C\u0435\u0440\u0442\u043E\u043D\u043E\u0441\u043D\u043E\u0435 \u043F\u043E\u043B\u0435 \u043D\u0430 \u0441\u043E\u0441\u0435\u0434\u043D\u0438\u0435 \u043A\u043B\u0435\u0442\u043A\u0438!", "danger");
-      }
-    } else if (name === "electric") {
-      map.health = Math.max(0, map.health - 25);
-      appendSystemMessage("\u26A1 \u042D\u041B\u0415\u041A\u0422\u0420\u0410! \u042D\u043B\u0435\u043A\u0442\u0440\u0438\u0447\u0435\u0441\u043A\u0438\u0439 \u0448\u043E\u043A \u043F\u0430\u0440\u0430\u043B\u0438\u0437\u0443\u0435\u0442 \u043E\u0442\u0440\u044F\u0434: -25HP!", "danger");
-    } else if (name === "vortex") {
-      map.health = Math.max(0, map.health - 15);
-      appendSystemMessage("\u{1F300} \u0412\u041E\u0420\u041E\u041D\u041A\u0410! \u0413\u0440\u0443\u043F\u043F\u0443 \u0437\u0430\u0442\u044F\u043D\u0443\u043B\u043E \u0432 \u043C\u0430\u043B\u0443\u044E \u0441\u0438\u043D\u0433\u0443\u043B\u044F\u0440\u043D\u043E\u0441\u0442\u044C: -15HP! \u0412\u044B \u0441\u0434\u0432\u0438\u043D\u0443\u0442\u044B \u0432 \u0441\u0442\u043E\u0440\u043E\u043D\u0443.", "danger");
-      const directions = [{ dx: 1, dy: 0 }, { dx: -1, dy: 0 }, { dx: 0, dy: 1 }, { dx: 0, dy: -1 }];
-      const valid = directions.filter(
-        (d) => nx + d.dx >= 0 && nx + d.dx < map.width && ny + d.dy >= 0 && ny + d.dy < map.height
-      );
-      if (valid.length > 0) {
-        const d = valid[Math.floor(Math.random() * valid.length)];
-        map.playerPos = { x: nx + d.dx, y: ny + d.dy };
-        resolveCellEnter(nx + d.dx, ny + d.dy);
-      }
-    } else if (name === "time_loop") {
-      map.health = Math.max(0, map.health - 10);
-      appendSystemMessage("\u23F3 \u0425\u0420\u041E\u041D\u041E\u0421\u0414\u0412\u0418\u0413! \u0412\u0441\u043F\u044B\u0448\u043A\u0430 \u0432\u0440\u0435\u043C\u0435\u043D\u043D\u043E\u0439 \u043F\u0435\u0442\u043B\u0438 \u043F\u0435\u0440\u0435\u0431\u0440\u0430\u0441\u044B\u0432\u0430\u0435\u0442 \u0433\u0440\u0443\u043F\u043F\u0443 \u043D\u0430 \u0442\u043E\u0447\u043A\u0443 \u0432\u0445\u043E\u0434\u0430: -10HP!", "danger");
-      map.playerPos = { x: map.entrance.x, y: map.entrance.y };
-      resolveCellEnter(map.entrance.x, map.entrance.y);
-    }
+    if (!cell.anomalyResolved) startAnomalyEncounter(cell);
   }
 }
 function getAnomalyRussianName(type) {
-  if (!type) return "\u041D\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043D\u0430\u044F \u0430\u043D\u043E\u043C\u0430\u043B\u0438\u044F";
-  const translations = {
-    "fire": "\u0416\u0430\u0440\u043A\u0430",
-    "trampoline": "\u0422\u0440\u0430\u043C\u043F\u043B\u0438\u043D",
-    "sphere": "\u0413\u0440\u0430\u0432\u0438-\u0441\u0444\u0435\u0440\u0430",
-    "electric": "\u042D\u043B\u0435\u043A\u0442\u0440\u0430",
-    "vortex": "\u0412\u043E\u0440\u043E\u043D\u043A\u0430",
-    "time_loop": "\u0425\u0440\u043E\u043D\u043E\u0441\u0434\u0432\u0438\u0433"
+  return type ? ANOMALY_BY_ID[type]?.name || type : "\u041D\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043D\u0430\u044F \u0430\u043D\u043E\u043C\u0430\u043B\u0438\u044F";
+}
+function seededNumber(seed, index = 0) {
+  return createRandomGenerator(`${seed}:${index}`)();
+}
+function encounterSequence(anomalyId, seed) {
+  const pools = {
+    "crystal-resonance": ["tone-low", "tone-mid", "tone-high"],
+    "echo-loop": ["echo-a", "echo-b", "echo-c"]
   };
-  return translations[type] || type;
+  const pool = pools[anomalyId];
+  if (!pool) return [];
+  const original = Array.from({ length: 3 }, (_, index) => pool[Math.floor(seededNumber(seed, index) * pool.length)]);
+  return anomalyId === "echo-loop" ? original.reverse() : original;
+}
+function startAnomalyEncounter(cell) {
+  const definition2 = ANOMALY_BY_ID[cell.anomalyType];
+  if (!definition2 || map.activeAnomalyEncounter) return;
+  const seed = cell.anomalySeed || `${map.seed || "EON"}:${cell.x}:${cell.y}:${cell.anomalyType}`;
+  const kind = encounterKind(definition2.id);
+  if (kind === "field") {
+    if (!cell.fieldWarned) {
+      cell.fieldWarned = true;
+      appendSystemMessage(`\u26A0\uFE0F ${definition2.name}: ${definition2.detection.passiveSignal} \u041F\u0435\u0440\u0432\u044B\u0439 \u043A\u043E\u043D\u0442\u0430\u043A\u0442 \u0431\u0435\u0437\u043E\u043F\u0430\u0441\u0435\u043D. \u041F\u043E\u0432\u0442\u043E\u0440\u043D\u044B\u0439 \u0432\u0445\u043E\u0434 \u0432\u044B\u0437\u043E\u0432\u0435\u0442 \u044D\u0444\u0444\u0435\u043A\u0442 \u0430\u043D\u043E\u043C\u0430\u043B\u0438\u0438: \u043E\u0431\u043E\u0439\u0434\u0438\u0442\u0435 \u043E\u0447\u0430\u0433 \u0438\u043B\u0438 \u0438\u0441\u0441\u043B\u0435\u0434\u0443\u0439\u0442\u0435 \u0435\u0433\u043E \u0431\u043E\u043B\u0442\u043E\u043C.`, "warning");
+      return;
+    }
+    const visit = cell.fieldVisits || 0;
+    const safe = [], expandable = [];
+    for (const row of map.grid) for (const candidate of row) {
+      if (candidate.type !== "empty" || candidate.radiationLevel > 0) continue;
+      const index = candidate.y * map.width + candidate.x;
+      safe.push(index);
+      if (Math.abs(candidate.x - cell.x) + Math.abs(candidate.y - cell.y) === 1) expandable.push(index);
+    }
+    const effect = fieldOutcome(definition2.id, seed, visit, safe, expandable);
+    cell.fieldVisits = visit + 1;
+    const damage = Math.min(effect.damage, Math.max(0, map.health - 1));
+    map.health -= damage;
+    const consequences2 = [];
+    if (damage) consequences2.push(`\u0417\u0434\u043E\u0440\u043E\u0432\u044C\u0435 \u2212${damage}`);
+    if (effect.expansion !== null) {
+      const x = effect.expansion % map.width, y = Math.floor(effect.expansion / map.width);
+      Object.assign(map.grid[y][x], { type: "anomaly", anomalyType: definition2.id, anomalySeed: `${seed}:growth:${visit}`, isRevealed: true, fieldWarned: false });
+      consequences2.push(`\u041E\u0447\u0430\u0433 \u0440\u0430\u0441\u0448\u0438\u0440\u0438\u043B\u0441\u044F \u0432 \u043A\u043B\u0435\u0442\u043A\u0443 ${x}, ${y}; \u043D\u043E\u0432\u044B\u0439 \u043A\u0440\u0430\u0439 \u0434\u0430\u0451\u0442 \u043F\u0440\u0435\u0434\u0443\u043F\u0440\u0435\u0436\u0434\u0435\u043D\u0438\u0435 \u043F\u0435\u0440\u0435\u0434 \u0432\u043E\u0437\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435\u043C`);
+    }
+    if (effect.destination !== null) {
+      const x = effect.destination % map.width, y = Math.floor(effect.destination / map.width);
+      map.playerPos = { x, y };
+      map.grid[y][x].isRevealed = true;
+      consequences2.push(`\u041E\u0442\u0440\u044F\u0434 \u043F\u0435\u0440\u0435\u043C\u0435\u0449\u0451\u043D \u0432 \u0431\u0435\u0437\u043E\u043F\u0430\u0441\u043D\u0443\u044E \u043A\u043B\u0435\u0442\u043A\u0443 ${x}, ${y}`);
+    }
+    map.anomalyJournal ||= [];
+    map.anomalyJournal.push({ anomalyId: definition2.id, seed: `${seed}:field:${visit}`, mode: "field", participants: [...new Set([...clients.values()].map((p) => p.username))], usedSkills: [], rollResults: [], decisions: ["\u041F\u043E\u0432\u0442\u043E\u0440\u043D\u044B\u0439 \u0432\u0445\u043E\u0434 \u043F\u043E\u0441\u043B\u0435 \u043F\u0440\u0435\u0434\u0443\u043F\u0440\u0435\u0436\u0434\u0435\u043D\u0438\u044F"], mistakes: 0, result: "successWithCost", consequences: consequences2, rewards: [], trainChanges: [], completedAt: (/* @__PURE__ */ new Date()).toISOString() });
+    appendSystemMessage(`\u25C6 ${definition2.name}: ${consequences2.join("; ") || "\u041E\u0447\u0430\u0433 \u0437\u0430\u0442\u0438\u0445, \u0434\u043E\u0441\u0442\u0443\u043F\u043D\u044B\u0445 \u043A\u043B\u0435\u0442\u043E\u043A \u0434\u043B\u044F \u0432\u043E\u0437\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u044F \u043D\u0435\u0442"}.`, "warning");
+    return;
+  }
+  const difficulty = map.difficulty ?? definition2.dangerTier;
+  const mode = kind === "rolls" ? "gurps-roll" : map.anomalyResolutionMode || "hybrid";
+  map.activeAnomalyEncounter = {
+    anomalyId: definition2.id,
+    seed,
+    mode,
+    phase: "warning",
+    difficulty,
+    timeRemaining: encounterSeconds(difficulty),
+    puzzle: mode !== "gurps-roll" ? createPuzzle(definition2.id, seed, difficulty) : void 0,
+    anomalyStability: 70,
+    exposure: 0,
+    contamination: 0,
+    trainIntegrityRisk: 0,
+    discoveredClues: [definition2.detection.passiveSignal],
+    mistakes: 0,
+    elapsedRounds: 0,
+    progress: 0,
+    sequence: encounterSequence(definition2.id, seed),
+    sequenceIndex: 0,
+    preparedActions: [],
+    usedSkills: [],
+    rollResults: [],
+    decisions: [],
+    participants: [],
+    paused: false
+  };
+  appendSystemMessage(`\u26A0\uFE0F \u041E\u0431\u043D\u0430\u0440\u0443\u0436\u0435\u043D\u0430 \u0430\u043D\u043E\u043C\u0430\u043B\u0438\u044F \xAB${definition2.name}\xBB. \u041D\u0430\u0431\u043B\u044E\u0434\u0430\u0435\u043C\u044B\u0439 \u0441\u0438\u0433\u043D\u0430\u043B: ${definition2.detection.passiveSignal}`, "warning");
+}
+function updateEncounterPhase(encounter, definition2) {
+  const matches = (phaseId) => {
+    const transition = definition2.phases.find((phase) => phase.id === phaseId)?.transition || {};
+    if (transition.onResult) return encounter.result && transition.onResult.includes(encounter.result);
+    const checks = [];
+    if (transition.minRounds !== void 0) checks.push(encounter.elapsedRounds >= transition.minRounds);
+    if (transition.minMistakes !== void 0) checks.push(encounter.mistakes >= transition.minMistakes);
+    if (transition.maxStability !== void 0) checks.push(encounter.anomalyStability <= transition.maxStability);
+    return checks.length > 0 && checks.some(Boolean);
+  };
+  const phaseOrder = ["dormant", "warning", "active", "collapse", "aftermath"];
+  let nextPhase = "dormant";
+  if (matches("aftermath")) nextPhase = "aftermath";
+  else if (matches("collapse")) nextPhase = "collapse";
+  else if (matches("active")) nextPhase = "active";
+  else if (matches("warning")) nextPhase = "warning";
+  if (phaseOrder.indexOf(nextPhase) >= phaseOrder.indexOf(encounter.phase)) encounter.phase = nextPhase;
+}
+function finishEncounter(result) {
+  const encounter = map.activeAnomalyEncounter;
+  const definition2 = encounter && ANOMALY_BY_ID[encounter.anomalyId];
+  if (!encounter || !definition2 || encounter.result) return;
+  encounter.result = result;
+  encounter.phase = "aftermath";
+  const consequencePool = result === "completeSuccess" || result === "retreat" ? [] : definition2.characterConsequences[result] || [];
+  const consequence = consequencePool.length ? consequencePool[Math.floor(seededNumber(encounter.seed, 90 + encounter.mistakes) * consequencePool.length)] : null;
+  const rewards = result === "completeSuccess" || result === "successWithCost" ? [definition2.rewards[Math.floor(seededNumber(encounter.seed, 120) * definition2.rewards.length)]] : [];
+  const trainChanges = encounter.trainIntegrityRisk >= 60 ? [definition2.trainConsequences.possiblePermanentFaults[0]] : encounter.trainIntegrityRisk >= 25 ? [definition2.trainConsequences.possibleTemporaryFaults[0]] : [];
+  const hpLoss = result === "criticalFailure" ? 20 : result === "failure" ? 12 : result === "partialFailure" ? 6 : result === "successWithCost" ? 3 : 0;
+  map.health = Math.max(0, map.health - hpLoss);
+  if (rewards.length) {
+    if (!map.inventory) map.inventory = [];
+    map.inventory.push(...rewards);
+  }
+  const pos = map.playerPos;
+  const cell = pos && map.grid[pos.y]?.[pos.x];
+  if (cell?.anomalyType === encounter.anomalyId) cell.anomalyResolved = result !== "retreat";
+  if (result === "retreat") map.playerPos = { ...map.entrance };
+  if (!map.anomalyJournal) map.anomalyJournal = [];
+  map.anomalyJournal.push({
+    anomalyId: encounter.anomalyId,
+    seed: encounter.seed,
+    mode: encounter.mode,
+    participants: encounter.participants,
+    usedSkills: encounter.usedSkills,
+    rollResults: encounter.rollResults,
+    decisions: encounter.decisions,
+    mistakes: encounter.mistakes,
+    result,
+    consequences: consequence ? [consequence] : [],
+    rewards,
+    trainChanges,
+    completedAt: (/* @__PURE__ */ new Date()).toISOString()
+  });
+  appendSystemMessage(`\u25C6 \xAB${definition2.name}\xBB: ${RESULT_LABELS[result]}. ${consequence || "\u042D\u043A\u0438\u043F\u0430\u0436 \u0441\u043E\u0445\u0440\u0430\u043D\u0438\u043B \u043A\u043E\u043D\u0442\u0440\u043E\u043B\u044C \u043D\u0430\u0434 \u0441\u0438\u0442\u0443\u0430\u0446\u0438\u0435\u0439."}`, result === "completeSuccess" ? "success" : "warning");
+}
+function applyEncounterAction(action, username) {
+  const encounter = map?.activeAnomalyEncounter;
+  if (!encounter || encounter.result || encounter.paused || action.kind !== "retreat" || encounter.phase === "collapse") return;
+  if (!encounter.participants.includes(username)) encounter.participants.push(username);
+  encounter.decisions.push(`${username}: \u043E\u0442\u0441\u0442\u0443\u043F\u043B\u0435\u043D\u0438\u0435`);
+  finishEncounter("retreat");
+}
+function resolveGurpsRoll(skillTag, target, username, foundryItemUuid) {
+  const encounter = map.activeAnomalyEncounter;
+  const definition2 = encounter && ANOMALY_BY_ID[encounter.anomalyId];
+  if (!encounter || !definition2 || encounter.result || encounter.paused) return;
+  if (!definition2.gurpsResolution.allowedSkillTags.includes(skillTag) && skillTag !== "manual") return;
+  const safeTarget = Math.max(3, Math.min(18, Math.floor(target)));
+  const index = encounter.rollResults.length;
+  const dice = rollThreeDice(encounter.seed, index);
+  const roll = dice.reduce((sum, die) => sum + die, 0);
+  const effectiveTarget = safeTarget + definition2.gurpsResolution.defaultPenalty;
+  const criticalSuccess = roll <= 4 || roll === 5 && effectiveTarget >= 15 || roll === 6 && effectiveTarget >= 16;
+  const criticalFailure = roll === 18 || roll === 17 && effectiveTarget <= 15 || roll - effectiveTarget >= 10;
+  const success = criticalSuccess || roll < 17 && roll <= effectiveTarget;
+  const critical = criticalSuccess || criticalFailure;
+  const resolvedSkill = skillTag === "manual" && foundryItemUuid ? `manual:${foundryItemUuid}` : skillTag;
+  encounter.rollResults.push({ skillTag, foundryItemUuid, target: effectiveTarget, roll, margin: effectiveTarget - roll, success, critical });
+  encounter.usedSkills.push(resolvedSkill);
+  if (!encounter.participants.includes(username)) encounter.participants.push(username);
+  encounter.elapsedRounds++;
+  if (success) {
+    if (encounter.mode === "gurps-roll") encounter.progress++;
+    else {
+      encounter.preparedActions.push("hybrid-forgiveness");
+      encounter.timeRemaining += 10;
+      encounter.discoveredClues.push("\u0423\u0441\u043F\u0435\u0448\u043D\u0430\u044F \u043F\u0440\u043E\u0432\u0435\u0440\u043A\u0430: +10 \u0441\u0435\u043A\u0443\u043D\u0434 \u0438 \u0437\u0430\u0449\u0438\u0442\u0430 \u043E\u0442 \u043E\u0434\u043D\u043E\u0439 \u043E\u0448\u0438\u0431\u043A\u0438.");
+      const clue = definition2.detection.clues[Math.min(encounter.discoveredClues.length, definition2.detection.clues.length - 1)];
+      if (clue && !encounter.discoveredClues.includes(clue)) encounter.discoveredClues.push(clue);
+    }
+    encounter.anomalyStability = Math.min(100, encounter.anomalyStability + 10);
+    if (critical && map.anomalyCriticalRollAutoSuccess) return finishEncounter("completeSuccess");
+  } else {
+    encounter.mistakes++;
+    encounter.exposure = Math.min(100, encounter.exposure + (critical ? 20 : 10));
+    encounter.anomalyStability = Math.max(0, encounter.anomalyStability - (critical ? 25 : 12));
+  }
+  updateEncounterPhase(encounter, definition2);
+  if (encounter.mode === "gurps-roll" && encounter.progress >= definition2.gurpsResolution.requiredSuccesses) finishEncounter(encounter.mistakes ? "successWithCost" : "completeSuccess");
+  else if (encounter.phase === "collapse" && encounter.mistakes >= definition2.minigame.maxMistakes + 1) finishEncounter("criticalFailure");
 }
 function executeGameAction(action) {
   if (!map) return;
+  if (map.activeAnomalyEncounter) {
+    appendSystemMessage("\u26A0\uFE0F \u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u0440\u0430\u0437\u0440\u0435\u0448\u0438\u0442\u0435 \u0442\u0435\u043A\u0443\u0449\u0443\u044E \u0430\u043D\u043E\u043C\u0430\u043B\u0438\u044E \u0438\u043B\u0438 \u043E\u0442\u0441\u0442\u0443\u043F\u0438\u0442\u0435.", "warning");
+    return;
+  }
   if (!map.playerPos) {
     map.playerPos = { x: map.entrance.x, y: map.entrance.y };
   }
@@ -388,14 +785,23 @@ function executeGameAction(action) {
   if (action === "UP" || action === "DOWN" || action === "LEFT" || action === "RIGHT") {
     map.activeDirectionHighlight = null;
   }
-  map.timerSeconds = 60;
+  if (!map.activeAnomalyEncounter) map.timerSeconds = 60;
   checkGameLossSurvival();
 }
 var serverClockInterval = null;
 function initTurnTimerClock() {
   if (serverClockInterval) clearInterval(serverClockInterval);
   serverClockInterval = setInterval(() => {
-    if (gameState === "playing" && map) {
+    if (gameState === "playing" && map?.activeAnomalyEncounter) {
+      const encounter = map.activeAnomalyEncounter;
+      const tick = tickAnomalyClock(encounter, map.anomalyTimerEnabled !== false);
+      if (tick === "paused") return;
+      if (tick === "expired") {
+        encounter.decisions.push("\u0418\u0441\u0442\u0435\u043A\u043B\u043E \u0432\u0440\u0435\u043C\u044F \u0440\u0435\u0448\u0435\u043D\u0438\u044F");
+        finishEncounter(encounter.progress > 0 ? "partialFailure" : "failure");
+      }
+      broadcast("SYNC_APP_STATE", { map, gameState, messages });
+    } else if (gameState === "playing" && map && !map.activeAnomalyEncounter) {
       if (map.timerSeconds > 0) {
         map.timerSeconds--;
         broadcast("TIMER_TICK", { timerSeconds: map.timerSeconds });
@@ -458,6 +864,7 @@ function saveShopItems() {
 var TAVERN_SETTINGS_FILE = import_path.default.join(process.cwd(), "db_tavern_settings.json");
 var tavernSettings = {
   tavernName: "\u0411\u0430\u0440 \xAB100 \u0420\u0435\u043D\u0442\u0433\u0435\u043D\xBB",
+  merchantName: "\u0421\u0438\u0434\u043E\u0440\u043E\u0432\u0438\u0447",
   enabledGames: {
     trades: true,
     pazaak: true,
@@ -465,12 +872,17 @@ var tavernSettings = {
     races: true,
     slots: true,
     roulette: true,
-    shooting: true
+    shooting: true,
+    thimblerig: true,
+    svinya: true
   }
 };
 try {
   if (import_fs.default.existsSync(TAVERN_SETTINGS_FILE)) {
     tavernSettings = JSON.parse(import_fs.default.readFileSync(TAVERN_SETTINGS_FILE, "utf-8"));
+    if (!tavernSettings.merchantName) {
+      tavernSettings.merchantName = "\u0421\u0438\u0434\u043E\u0440\u043E\u0432\u0438\u0447";
+    }
   } else {
     import_fs.default.writeFileSync(TAVERN_SETTINGS_FILE, JSON.stringify(tavernSettings, null, 2), "utf-8");
   }
@@ -484,6 +896,20 @@ function saveTavernSettings() {
     console.error("\u041E\u0448\u0438\u0431\u043A\u0430 \u0441\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u0438\u044F db_tavern_settings.json:", e);
   }
 }
+function formatCredits(amount) {
+  const lastDigit = amount % 10;
+  const lastTwoDigits = amount % 100;
+  if (lastTwoDigits >= 11 && lastTwoDigits <= 19) {
+    return `${amount} \u043A\u0440\u0435\u0434\u0438\u0442\u043E\u0432`;
+  }
+  if (lastDigit === 1) {
+    return `${amount} \u043A\u0440\u0435\u0434\u0438\u0442`;
+  }
+  if (lastDigit >= 2 && lastDigit <= 4) {
+    return `${amount} \u043A\u0440\u0435\u0434\u0438\u0442\u0430`;
+  }
+  return `${amount} \u043A\u0440\u0435\u0434\u0438\u0442\u043E\u0432`;
+}
 function initPlayerProfile(id, username) {
   if (!playerDb[id]) {
     playerDb[id] = {
@@ -493,7 +919,7 @@ function initPlayerProfile(id, username) {
       pazaakDeck: []
     };
     savePlayerDb();
-    appendSystemMessage(`\u{1F464} \u0411\u0430\u0437\u0430 \u0414\u0430\u043D\u043D\u044B\u0445: \u0421\u0444\u043E\u0440\u043C\u0438\u0440\u043E\u0432\u0430\u043D \u043A\u043E\u0448\u0435\u043B\u0435\u043A \u0432 \u041A\u041F\u041A-\u0441\u0435\u0442\u0438 \u0434\u043B\u044F \u0441\u0442\u0430\u043B\u043A\u0435\u0440\u0430 "${username}" (+1000 RU).`, "info");
+    appendSystemMessage(`\u{1F464} \u0411\u0430\u0437\u0430 \u0414\u0430\u043D\u043D\u044B\u0445: \u0421\u0444\u043E\u0440\u043C\u0438\u0440\u043E\u0432\u0430\u043D \u043A\u043E\u0448\u0435\u043B\u0435\u043A \u0432 \u041A\u041F\u041A-\u0441\u0435\u0442\u0438 \u0434\u043B\u044F \u0441\u0442\u0430\u043B\u043A\u0435\u0440\u0430 "${username}" (+1000 \u043A\u0440.).`, "info");
   } else if (!playerDb[id].userName) {
     playerDb[id].userName = username;
     savePlayerDb();
@@ -504,6 +930,69 @@ function broadcastTavernGames() {
   broadcast("SYNC_TAVERN_GAMES", { pazaakLobbies, playerDb, activeRace, shopItems, tavernSettings });
 }
 var pazaakLobbies = {};
+var activeSvinyaBets = {};
+var activeDiceGames = {};
+var SELF_ID_FIELDS = {
+  PAZAAK_BUY_BOOSTER: "playerId",
+  PAZAAK_SAVE_DECK: "playerId",
+  PAZAAK_CREATE_LOBBY: "creatorId",
+  PAZAAK_JOIN_LOBBY: "opponentId",
+  PAZAAK_PLAY_CARD: "playerId",
+  PAZAAK_END_TURN: "playerId",
+  PAZAAK_STAND: "playerId",
+  PAZAAK_CONCEDE: "playerId",
+  DICE_PLAY_BOT: "playerId",
+  DICE_REROLL: "playerId",
+  RACE_PLACE_BET: "playerId",
+  BAR_SELL_ITEM: "playerId",
+  BUY_SHOP_ITEM: "playerId",
+  SLOTS_SPIN: "playerId",
+  ROULETTE_SPIN: "playerId",
+  SHOOTING_RANGE_FINISH: "playerId",
+  THIMBLERIG_PLAY: "playerId",
+  SVINYA_START: "playerId",
+  SVINYA_FINISH: "playerId"
+};
+var BET_FIELDS = {
+  PAZAAK_CREATE_LOBBY: "bet",
+  DICE_PLAY_BOT: "bet",
+  RACE_PLACE_BET: "betAmount",
+  SLOTS_SPIN: "bet",
+  ROULETTE_SPIN: "betAmount",
+  SHOOTING_RANGE_FINISH: "bet",
+  THIMBLERIG_PLAY: "bet",
+  SVINYA_START: "bet"
+};
+var BAR_ACTIVITY_COMMANDS = /* @__PURE__ */ new Set([
+  "PAZAAK_BUY_BOOSTER",
+  "PAZAAK_SAVE_DECK",
+  "PAZAAK_CREATE_LOBBY",
+  "PAZAAK_JOIN_LOBBY",
+  "PAZAAK_PLAY_CARD",
+  "PAZAAK_END_TURN",
+  "PAZAAK_STAND",
+  "PAZAAK_CONCEDE",
+  "DICE_PLAY_BOT",
+  "DICE_REROLL",
+  "RACE_PLACE_BET",
+  "BAR_SELL_ITEM",
+  "BUY_SHOP_ITEM",
+  "SLOTS_SPIN",
+  "ROULETTE_SPIN",
+  "SHOOTING_RANGE_FINISH",
+  "THIMBLERIG_PLAY",
+  "SVINYA_START",
+  "SVINYA_FINISH"
+]);
+function sendError(ws, text) {
+  ws.send(JSON.stringify({ type: "NOTIFICATION", payload: { text, type: "danger" } }));
+}
+function isPositiveCreditAmount(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= 1e6;
+}
+function isValidPlayerIdentity(id, username) {
+  return typeof id === "string" && typeof username === "string" && id === username && id.trim() === id && id.length >= 1 && id.length <= 40 && id !== "__proto__" && id !== "prototype" && id !== "constructor" && !/[\u0000-\u001f\u007f]/.test(id);
+}
 var activeRace = {
   status: "none",
   contestants: [
@@ -517,6 +1006,7 @@ var activeRace = {
   log: [],
   tickCount: 0
 };
+var activeRaceInterval = null;
 function rollPazaakStep(lobby) {
   if (lobby.status !== "playing") return;
   const currentTurn = lobby.turn;
@@ -659,14 +1149,9 @@ function checkPazaakRoundEnd(lobby) {
       lobby.status = "finished";
       lobby.winner = lobby.creatorId;
       lobby.statusMessage = `\u041F\u043E\u0431\u0435\u0434\u043D\u044B\u0439 \u0444\u0438\u043D\u0430\u043B! ${lobby.creatorName} \u0440\u0430\u0437\u0433\u0440\u043E\u043C\u0438\u043B \u043E\u043F\u043F\u043E\u043D\u0435\u043D\u0442\u0430 ${lobby.roundsWonA}:${lobby.roundsWonB}!`;
-      lobby.log.push(`\u{1F3C6} ${lobby.creatorName} \u0437\u0430\u0431\u0438\u0440\u0430\u0435\u0442 \u0432\u0441\u0435! \u0412\u044B\u0438\u0433\u0440\u044B\u0448: +${lobby.bet} RU`);
+      lobby.log.push(`\u{1F3C6} ${lobby.creatorName} \u0437\u0430\u0431\u0438\u0440\u0430\u0435\u0442 \u0432\u0441\u0435! \u0412\u044B\u0438\u0433\u0440\u044B\u0448: +${formatCredits(lobby.bet)}`);
       if (playerDb[lobby.creatorId]) {
-        playerDb[lobby.creatorId].balance += lobby.bet;
-      }
-      if (lobby.opponentId !== "BOT_BAR" && playerDb[lobby.opponentId]) {
-        playerDb[lobby.opponentId].balance -= lobby.bet;
-      } else if (lobby.opponentId === "BOT_BAR") {
-        playerDb[lobby.creatorId].balance += lobby.bet;
+        playerDb[lobby.creatorId].balance += lobby.bet * 2;
       }
       savePlayerDb();
     } else if (lobby.roundsWonB >= 3) {
@@ -677,7 +1162,7 @@ function checkPazaakRoundEnd(lobby) {
       if (lobby.opponentId !== "BOT_BAR" && playerDb[lobby.opponentId]) {
         playerDb[lobby.opponentId].balance += lobby.bet * 2;
       } else if (lobby.opponentId === "BOT_BAR") {
-        lobby.log.push(`\u{1F4B8} \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${lobby.creatorName} \u043E\u0441\u0442\u0430\u0432\u043B\u044F\u0435\u0442 \u0441\u0442\u0430\u0432\u043A\u0443 ${lobby.bet} RU \u0443 \u0431\u0430\u0440\u043C\u0435\u043D\u0430.`);
+        lobby.log.push(`\u{1F4B8} \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${lobby.creatorName} \u043E\u0441\u0442\u0430\u0432\u043B\u044F\u0435\u0442 \u0441\u0442\u0430\u0432\u043A\u0443 ${formatCredits(lobby.bet)} \u0443 \u0431\u0430\u0440\u043C\u0435\u043D\u0430.`);
       }
       savePlayerDb();
     } else {
@@ -717,10 +1202,41 @@ wss.on("connection", (ws) => {
   console.log("\u041D\u043E\u0432\u043E\u0435 \u0441\u043E\u043A\u0435\u0442-\u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u0435.");
   ws.on("message", (messageStr) => {
     try {
-      const { type, payload } = JSON.parse(messageStr.toString());
+      const parsedMessage = JSON.parse(messageStr.toString());
+      const type = parsedMessage?.type;
+      const payload = parsedMessage?.payload ?? {};
+      if (typeof type !== "string" || typeof payload !== "object" || Array.isArray(payload)) {
+        sendError(ws, "\u041D\u0435\u043A\u043E\u0440\u0440\u0435\u043A\u0442\u043D\u044B\u0439 \u0444\u043E\u0440\u043C\u0430\u0442 \u043A\u043E\u043C\u0430\u043D\u0434\u044B.");
+        return;
+      }
+      if (gameState === "playing" && BAR_ACTIVITY_COMMANDS.has(type)) {
+        sendError(ws, "\u0411\u0430\u0440 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D \u0432\u043E \u0432\u0440\u0435\u043C\u044F \u0430\u043A\u0442\u0438\u0432\u043D\u043E\u0439 \u044D\u043A\u0441\u043F\u0435\u0434\u0438\u0446\u0438\u0438.");
+        return;
+      }
+      const selfIdField = SELF_ID_FIELDS[type];
+      if (selfIdField) {
+        const player = clients.get(ws);
+        if (!player || payload[selfIdField] !== player.id) {
+          sendError(ws, "\u041E\u043F\u0435\u0440\u0430\u0446\u0438\u044F \u043E\u0442\u043A\u043B\u043E\u043D\u0435\u043D\u0430: \u043F\u0440\u043E\u0444\u0438\u043B\u044C \u043E\u0442\u043F\u0440\u0430\u0432\u0438\u0442\u0435\u043B\u044F \u043D\u0435 \u0441\u043E\u0432\u043F\u0430\u0434\u0430\u0435\u0442 \u0441 \u043F\u0440\u043E\u0444\u0438\u043B\u0435\u043C \u043E\u043F\u0435\u0440\u0430\u0446\u0438\u0438.");
+          return;
+        }
+        if ("username" in payload) payload.username = player.username;
+        if ("creatorName" in payload) payload.creatorName = player.username;
+        if ("opponentName" in payload) payload.opponentName = player.username;
+      }
+      const betField = BET_FIELDS[type];
+      if (betField && !isPositiveCreditAmount(payload[betField])) {
+        sendError(ws, "\u0421\u0442\u0430\u0432\u043A\u0430 \u0434\u043E\u043B\u0436\u043D\u0430 \u0431\u044B\u0442\u044C \u0446\u0435\u043B\u044B\u043C \u043F\u043E\u043B\u043E\u0436\u0438\u0442\u0435\u043B\u044C\u043D\u044B\u043C \u0447\u0438\u0441\u043B\u043E\u043C \u043D\u0435 \u0431\u043E\u043B\u0435\u0435 1 000 000.");
+        return;
+      }
       switch (type) {
         case "JOIN": {
           const { id, username, role } = payload;
+          if (!isValidPlayerIdentity(id, username) || role !== "player" && role !== "gm") {
+            sendError(ws, "\u041D\u0435\u043A\u043E\u0440\u0440\u0435\u043A\u0442\u043D\u043E\u0435 \u0438\u043C\u044F \u043F\u0440\u043E\u0444\u0438\u043B\u044F \u0438\u043B\u0438 \u0440\u043E\u043B\u044C.");
+            ws.close();
+            return;
+          }
           if (role === "gm") {
             const activeGMId = getActiveGMId();
             if (activeGMId && activeGMId !== id) {
@@ -757,7 +1273,10 @@ wss.on("connection", (ws) => {
         }
         case "SYNC_APP_STATE": {
           const clientData = clients.get(ws);
-          if (!clientData) return;
+          if (!clientData || clientData.role !== "gm") {
+            sendError(ws, "\u0422\u043E\u043B\u044C\u043A\u043E \u043A\u0443\u0440\u0430\u0442\u043E\u0440 \u043C\u043E\u0436\u0435\u0442 \u0438\u0437\u043C\u0435\u043D\u044F\u0442\u044C \u0441\u043E\u0441\u0442\u043E\u044F\u043D\u0438\u0435 \u044D\u043A\u0441\u043F\u0435\u0434\u0438\u0446\u0438\u0438.");
+            return;
+          }
           if (payload.gameState !== void 0) gameState = payload.gameState;
           if (payload.map !== void 0) {
             map = payload.map;
@@ -777,6 +1296,12 @@ wss.on("connection", (ws) => {
         }
         case "FORCE_CLAIM_GM": {
           const { id, username } = payload;
+          if (!isValidPlayerIdentity(id, username)) {
+            sendError(ws, "\u041D\u0435\u043A\u043E\u0440\u0440\u0435\u043A\u0442\u043D\u043E\u0435 \u0438\u043C\u044F \u043F\u0440\u043E\u0444\u0438\u043B\u044F.");
+            ws.close();
+            return;
+          }
+          initPlayerProfile(id, username);
           for (const [socket, player] of clients.entries()) {
             if (player.role === "gm" && player.id !== id) {
               player.role = "player";
@@ -809,8 +1334,13 @@ wss.on("connection", (ws) => {
         }
         case "SUBMIT_VOTE": {
           const player = clients.get(ws);
-          if (!player) return;
+          if (!player || player.role !== "player") return;
           const { action } = payload;
+          const allowedActions = /* @__PURE__ */ new Set(["UP", "DOWN", "LEFT", "RIGHT", "BOLT_UP", "BOLT_DOWN", "BOLT_LEFT", "BOLT_RIGHT", "GEIGER", "SCAN"]);
+          if (!allowedActions.has(action)) {
+            sendError(ws, "\u041D\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043D\u043E\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435 \u0433\u043E\u043B\u043E\u0441\u043E\u0432\u0430\u043D\u0438\u044F.");
+            return;
+          }
           activeVotes[player.id] = { username: player.username, action };
           const activePlayersCount = getActivePlayersCount();
           const votesCastKeys = Object.keys(activeVotes);
@@ -847,6 +1377,8 @@ wss.on("connection", (ws) => {
           break;
         }
         case "RESET_VOTES": {
+          const player = clients.get(ws);
+          if (!player || player.role !== "gm") return;
           activeVotes = {};
           broadcast("VOTES_UPDATE", { activeVotes, activePlayersCount: getActivePlayersCount() });
           break;
@@ -856,6 +1388,103 @@ wss.on("connection", (ws) => {
           if (!player || player.role !== "gm") return;
           const { action } = payload;
           executeGameAction(action);
+          broadcast("SYNC_APP_STATE", { map, gameState, messages });
+          break;
+        }
+        case "ANOMALY_ACK": {
+          const encounter = map?.activeAnomalyEncounter;
+          if (!clients.has(ws) || !encounter?.result || payload.seed !== encounter.seed) return;
+          map.activeAnomalyEncounter = null;
+          checkGameLossSurvival();
+          broadcast("SYNC_APP_STATE", { map, gameState, messages });
+          break;
+        }
+        case "ANOMALY_PUZZLE": {
+          const player = clients.get(ws), encounter = map?.activeAnomalyEncounter;
+          if (!player || !encounter?.puzzle || encounter.result || encounter.paused || payload.seed !== encounter.seed) return;
+          const status = applyPuzzleInput(encounter.puzzle, payload.input);
+          if (status === "ignored") return;
+          if (!encounter.participants.includes(player.username)) encounter.participants.push(player.username);
+          encounter.elapsedRounds++;
+          encounter.decisions.push(`${player.username}: ${JSON.stringify(payload.input)} \u2014 ${status === "mistake" ? "\u043E\u0448\u0438\u0431\u043A\u0430" : "\u0432\u0435\u0440\u043D\u043E"}`);
+          if (status === "mistake") {
+            const protection = encounter.preparedActions.indexOf("hybrid-forgiveness");
+            if (protection >= 0) encounter.preparedActions.splice(protection, 1);
+            else {
+              encounter.mistakes++;
+              encounter.exposure = Math.min(100, encounter.exposure + 15);
+              encounter.anomalyStability = Math.max(0, encounter.anomalyStability - 20);
+            }
+          } else {
+            const puzzle = encounter.puzzle;
+            encounter.progress = puzzle.kind === "wires" ? puzzle.connected.length : puzzle.kind === "sequence" ? puzzle.cursor : puzzle.visited.length - 1;
+          }
+          updateEncounterPhase(encounter, ANOMALY_BY_ID[encounter.anomalyId]);
+          if (status === "complete") finishEncounter(encounter.mistakes ? "successWithCost" : "completeSuccess");
+          else if (encounter.mistakes >= encounter.puzzle.limit) finishEncounter(encounter.progress ? "partialFailure" : "failure");
+          broadcast("SYNC_APP_STATE", { map, gameState, messages });
+          break;
+        }
+        case "ANOMALY_ACTION": {
+          const player = clients.get(ws);
+          const encounter = map?.activeAnomalyEncounter;
+          const definition2 = encounter && ANOMALY_BY_ID[encounter.anomalyId];
+          if (!player || !encounter || !definition2) return;
+          if (payload.actionId !== "retreat") {
+            sendError(ws, "\u0412 \u0440\u0435\u0436\u0438\u043C\u0435 GURPS \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u0443\u0439\u0442\u0435 \u0441\u0435\u0440\u0438\u044E \u043F\u0440\u043E\u0432\u0435\u0440\u043E\u043A \u043D\u0430\u0432\u044B\u043A\u043E\u0432.");
+            return;
+          }
+          const action = definition2.minigame.actions.find((candidate) => candidate.id === payload.actionId);
+          if (!action) {
+            sendError(ws, "\u041D\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043D\u043E\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435 \u0430\u043D\u043E\u043C\u0430\u043B\u0438\u0438.");
+            return;
+          }
+          applyEncounterAction(action, player.username);
+          broadcast("SYNC_APP_STATE", { map, gameState, messages });
+          break;
+        }
+        case "ANOMALY_GURPS_ROLL": {
+          const player = clients.get(ws);
+          const encounter = map?.activeAnomalyEncounter;
+          if (!player || !encounter) return;
+          if (encounter.mode === "minigame") {
+            sendError(ws, "\u041F\u0440\u043E\u0432\u0435\u0440\u043A\u0438 GURPS \u043E\u0442\u043A\u043B\u044E\u0447\u0435\u043D\u044B \u0432 \u0440\u0435\u0436\u0438\u043C\u0435 \u0447\u0438\u0441\u0442\u043E\u0439 \u043C\u0438\u043D\u0438-\u0438\u0433\u0440\u044B.");
+            return;
+          }
+          const target = Number(payload.target);
+          if (String(payload.skillTag || "manual") === "manual" && player.role !== "gm") {
+            sendError(ws, "\u041F\u0440\u043E\u0438\u0437\u0432\u043E\u043B\u044C\u043D\u044B\u0439 \u043D\u0430\u0432\u044B\u043A \u0432\u044B\u0431\u0438\u0440\u0430\u0435\u0442 \u0432\u0435\u0434\u0443\u0449\u0438\u0439.");
+            return;
+          }
+          if (encounter.mode === "hybrid" && encounter.rollResults.length >= 3) {
+            sendError(ws, "\u0412 \u0433\u0438\u0431\u0440\u0438\u0434\u043D\u043E\u043C \u0440\u0435\u0436\u0438\u043C\u0435 \u0434\u043E\u0441\u0442\u0443\u043F\u043D\u044B \u0442\u0440\u0438 \u0432\u0441\u043F\u043E\u043C\u043E\u0433\u0430\u0442\u0435\u043B\u044C\u043D\u044B\u0435 \u043F\u0440\u043E\u0432\u0435\u0440\u043A\u0438 \u043D\u0430 \u0441\u0446\u0435\u043D\u0443.");
+            return;
+          }
+          if (!Number.isFinite(target)) {
+            sendError(ws, "\u0423\u043A\u0430\u0436\u0438\u0442\u0435 \u0446\u0435\u043B\u0435\u0432\u043E\u0435 \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435 \u043D\u0430\u0432\u044B\u043A\u0430.");
+            return;
+          }
+          resolveGurpsRoll(String(payload.skillTag || "manual"), target, player.username, payload.foundryItemUuid ? String(payload.foundryItemUuid) : void 0);
+          const current = map.activeAnomalyEncounter;
+          const definition2 = current && ANOMALY_BY_ID[current.anomalyId];
+          if (current && definition2 && current.mode === "gurps-roll" && current.rollResults.length >= 5 && !current.result) {
+            finishEncounter(current.progress >= 2 ? "partialFailure" : "failure");
+          }
+          broadcast("SYNC_APP_STATE", { map, gameState, messages });
+          break;
+        }
+        case "ANOMALY_GM_PAUSE": {
+          const player = clients.get(ws);
+          if (!player || player.role !== "gm" || !map?.activeAnomalyEncounter) return;
+          map.activeAnomalyEncounter.paused = Boolean(payload.paused);
+          broadcast("SYNC_APP_STATE", { map, gameState, messages });
+          break;
+        }
+        case "ANOMALY_GM_RESOLVE": {
+          const player = clients.get(ws);
+          const allowedResults = ["completeSuccess", "successWithCost", "partialFailure", "failure", "criticalFailure", "retreat"];
+          if (!player || player.role !== "gm" || !map?.activeAnomalyEncounter || !allowedResults.includes(payload.result)) return;
+          finishEncounter(payload.result);
           broadcast("SYNC_APP_STATE", { map, gameState, messages });
           break;
         }
@@ -881,7 +1510,7 @@ wss.on("connection", (ws) => {
           const profile = playerDb[playerId];
           if (!profile) return;
           if (profile.balance < 300) {
-            ws.send(JSON.stringify({ type: "NOTIFICATION", payload: { text: "\u274C \u041D\u0435\u0434\u043E\u0441\u0442\u0430\u0442\u043E\u0447\u043D\u043E \u0441\u0440\u0435\u0434\u0441\u0442\u0432 \u043D\u0430 \u0431\u0430\u043B\u0430\u043D\u0441\u0435 \u041A\u041F\u041A! \u0411\u0443\u0441\u0442\u0435\u0440 \u0441\u0442\u043E\u0438\u0442 300 RU.", type: "danger" } }));
+            ws.send(JSON.stringify({ type: "NOTIFICATION", payload: { text: "\u274C \u041D\u0435\u0434\u043E\u0441\u0442\u0430\u0442\u043E\u0447\u043D\u043E \u0441\u0440\u0435\u0434\u0441\u0442\u0432 \u043D\u0430 \u0431\u0430\u043B\u0430\u043D\u0441\u0435 \u041A\u041F\u041A! \u0411\u0443\u0441\u0442\u0435\u0440 \u0441\u0442\u043E\u0438\u0442 300 \u043A\u0440\u0435\u0434\u0438\u0442\u043E\u0432.", type: "danger" } }));
             return;
           }
           profile.balance -= 300;
@@ -896,7 +1525,7 @@ wss.on("connection", (ws) => {
             type: "BOOSTER_PULLED_SUCCESS",
             payload: { pulled, profile }
           }));
-          appendSystemMessage(`\u{1F0CF} ${username} \u043F\u0440\u0438\u043E\u0431\u0440\u0435\u043B \u0431\u0443\u0441\u0442\u0435\u0440 \u041F\u0430\u0430\u0437\u0430\u043A\u0430 \u0437\u0430 300 RU \u0438 \u0432\u044B\u0442\u0430\u0449\u0438\u043B: [${pulled.join(", ")}]!`, "loot");
+          appendSystemMessage(`\u{1F0CF} ${username} \u043F\u0440\u0438\u043E\u0431\u0440\u0435\u043B \u0431\u0443\u0441\u0442\u0435\u0440 \u041F\u0430\u0430\u0437\u0430\u043A\u0430 \u0437\u0430 300 \u043A\u0440\u0435\u0434\u0438\u0442\u043E\u0432 \u0438 \u0432\u044B\u0442\u0430\u0449\u0438\u043B: [${pulled.join(", ")}]!`, "loot");
           broadcastTavernGames();
           break;
         }
@@ -904,7 +1533,15 @@ wss.on("connection", (ws) => {
           const { playerId, deck } = payload;
           const profile = playerDb[playerId];
           if (!profile) return;
-          if (deck.length === 8) {
+          const availableCards = [...profile.unlockedCards];
+          const ownsEveryCard = Array.isArray(deck) && deck.every((card) => {
+            if (typeof card !== "string") return false;
+            const ownedIndex = availableCards.indexOf(card);
+            if (ownedIndex < 0) return false;
+            availableCards.splice(ownedIndex, 1);
+            return true;
+          });
+          if (Array.isArray(deck) && deck.length === 8 && ownsEveryCard) {
             profile.pazaakDeck = deck;
             savePlayerDb();
             ws.send(JSON.stringify({ type: "NOTIFICATION", payload: { text: "\u2705 \u041A\u043E\u043B\u043E\u0434\u0430 \u041F\u0430\u0430\u0437\u0430\u043A\u0430 \u0443\u0441\u043F\u0435\u0448\u043D\u043E \u0441\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u0430!", type: "success" } }));
@@ -966,7 +1603,7 @@ wss.on("connection", (ws) => {
             playerBBoard: [],
             roundsWonA: 0,
             roundsWonB: 0,
-            log: [`\u041D\u0430\u0447\u0430\u0442\u0430 \u0432\u0441\u0442\u0440\u0435\u0447\u0430 \u041F\u0430\u0430\u0437\u0430\u043A \u043C\u0435\u0436\u0434\u0443 ${creatorName} \u0441\u043E \u0441\u0442\u0430\u0432\u043A\u043E\u0439 ${bet} RU.`],
+            log: [`\u041D\u0430\u0447\u0430\u0442\u0430 \u0432\u0441\u0442\u0440\u0435\u0447\u0430 \u041F\u0430\u0430\u0437\u0430\u043A \u043C\u0435\u0436\u0434\u0443 ${creatorName} \u0441\u043E \u0441\u0442\u0430\u0432\u043A\u043E\u0439 ${formatCredits(bet)}.`],
             statusMessage: opponentId === "BOT_BAR" ? "\u0418\u0433\u0440\u0430 \u043D\u0430\u0447\u0430\u043B\u0430\u0441\u044C!" : "\u041E\u0436\u0438\u0434\u0430\u0435\u043C \u043E\u043F\u043F\u043E\u043D\u0435\u043D\u0442\u0430...",
             winner: null
           };
@@ -974,7 +1611,7 @@ wss.on("connection", (ws) => {
           if (opponentId === "BOT_BAR") {
             rollPazaakStep(newLobby);
           }
-          appendSystemMessage(`\u{1F3B2} \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${creatorName} \u043E\u0442\u043A\u0440\u044B\u043B \u0441\u0442\u043E\u043B \u041F\u0430\u0430\u0437\u0430\u043A \u0441\u043E \u0441\u0442\u0430\u0432\u043A\u043E\u0439 ${bet} RU.`, "info");
+          appendSystemMessage(`\u{1F3B2} \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${creatorName} \u043E\u0442\u043A\u0440\u044B\u043B \u0441\u0442\u043E\u043B \u041F\u0430\u0430\u0437\u0430\u043A \u0441\u043E \u0441\u0442\u0430\u0432\u043A\u043E\u0439 ${formatCredits(bet)}.`, "info");
           broadcastTavernGames();
           break;
         }
@@ -1013,7 +1650,7 @@ wss.on("connection", (ws) => {
           lobby.status = "playing";
           lobby.statusMessage = "\u041E\u043F\u043F\u043E\u043D\u0435\u043D\u0442 \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0438\u043B\u0441\u044F! \u0421\u0434\u0430\u0447\u0430 \u043F\u0435\u0440\u0432\u043E\u0433\u043E \u0440\u0430\u0443\u043D\u0434\u0430...";
           lobby.log.push(`${opponentName} \u0437\u0430\u0448\u0435\u043B \u0432\u043E \u0432\u0441\u0442\u0440\u0435\u0447\u0443. \u0421\u0442\u0430\u0432\u043A\u0438 \u043F\u043E\u043F\u043E\u043B\u043D\u0435\u043D\u044B.`);
-          appendSystemMessage(`\u2694\uFE0F \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${opponentName} \u043F\u0440\u0438\u043D\u044F\u043B \u0434\u0443\u044D\u043B\u044C \u0432 \u041F\u0430\u0430\u0437\u0430\u043A \u043E\u0442 ${lobby.creatorName} \u043D\u0430 ${lobby.bet} RU!`, "warning");
+          appendSystemMessage(`\u2694\uFE0F \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${opponentName} \u043F\u0440\u0438\u043D\u044F\u043B \u0434\u0443\u044D\u043B\u044C \u0432 \u041F\u0430\u0430\u0437\u0430\u043A \u043E\u0442 ${lobby.creatorName} \u043D\u0430 ${formatCredits(lobby.bet)}!`, "warning");
           rollPazaakStep(lobby);
           broadcastTavernGames();
           break;
@@ -1133,6 +1770,7 @@ wss.on("connection", (ws) => {
           const playerDice = Array.from({ length: 5 }, () => Math.floor(Math.random() * 6) + 1);
           const botHand = evaluateDiceHand(botDice);
           const playerHand = evaluateDiceHand(playerDice);
+          activeDiceGames[playerId] = { bet, botDice, playerDice, rerollStep: 1 };
           ws.send(JSON.stringify({
             type: "DICE_STATE_SYNC",
             payload: {
@@ -1146,13 +1784,22 @@ wss.on("connection", (ws) => {
               lockedIndexes: [false, false, false, false, false]
             }
           }));
-          appendSystemMessage(`\u{1F3B2} \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${username} \u0431\u0440\u043E\u0441\u0430\u0435\u0442 \u043A\u043E\u0441\u0442\u0438 \u043F\u0440\u043E\u0442\u0438\u0432 \u0431\u0430\u0440\u043C\u0435\u043D\u0430 \u043D\u0430 ${bet} RU.`, "info");
+          appendSystemMessage(`\u{1F3B2} \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${username} \u0431\u0440\u043E\u0441\u0430\u0435\u0442 \u043A\u043E\u0441\u0442\u0438 \u043F\u0440\u043E\u0442\u0438\u0432 \u0431\u0430\u0440\u043C\u0435\u043D\u0430 \u043D\u0430 ${formatCredits(bet)}.`, "info");
           break;
         }
         case "DICE_REROLL": {
-          const { playerId, username, bet, playerDice, lockedIndexes, botDice, rerollStep } = payload;
+          const { playerId } = payload;
+          const username = clients.get(ws)?.username || "\u0421\u0442\u0430\u043B\u043A\u0435\u0440";
           const profile = playerDb[playerId];
-          if (!profile) return;
+          const game = activeDiceGames[playerId];
+          if (!profile || !game) {
+            sendError(ws, "\u0410\u043A\u0442\u0438\u0432\u043D\u0430\u044F \u043F\u0430\u0440\u0442\u0438\u044F \u0432 \u043A\u043E\u0441\u0442\u0438 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u0430.");
+            return;
+          }
+          const bet = game.bet;
+          const playerDice = game.playerDice;
+          const botDice = game.botDice;
+          const lockedIndexes = Array.isArray(payload.lockedIndexes) && payload.lockedIndexes.length === 5 ? payload.lockedIndexes.map(Boolean) : [false, false, false, false, false];
           const finalPlayerDice = playerDice.map((val, i) => {
             return lockedIndexes[i] ? val : Math.floor(Math.random() * 6) + 1;
           });
@@ -1165,8 +1812,14 @@ wss.on("connection", (ws) => {
             if (botMaxCount === 1 && val === Math.max(...botDice)) return val;
             return Math.floor(Math.random() * 6) + 1;
           });
-          const currentStep = rerollStep || 1;
+          const currentStep = game.rerollStep;
           if (currentStep === 1) {
+            activeDiceGames[playerId] = {
+              bet,
+              botDice: finalBotDice,
+              playerDice: finalPlayerDice,
+              rerollStep: 2
+            };
             ws.send(JSON.stringify({
               type: "DICE_STATE_SYNC",
               payload: {
@@ -1182,6 +1835,7 @@ wss.on("connection", (ws) => {
             }));
             appendSystemMessage(`\u{1F3B2} \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${username} \u0441\u043E\u0432\u0435\u0440\u0448\u0438\u043B \u043F\u0435\u0440\u0432\u044B\u0439 \u043F\u0435\u0440\u0435\u0431\u0440\u043E\u0441 \u043A\u043E\u0441\u0442\u0435\u0439. \u041E\u0436\u0438\u0434\u0430\u0435\u0442\u0441\u044F \u0444\u0438\u043D\u0430\u043B\u044C\u043D\u044B\u0439 \u0445\u043E\u0434.`, "info");
           } else {
+            delete activeDiceGames[playerId];
             const finalBotHand = evaluateDiceHand(finalBotDice);
             const finalPlayerHand = evaluateDiceHand(finalPlayerDice);
             let result = "lose";
@@ -1203,8 +1857,8 @@ wss.on("connection", (ws) => {
             if (result === "win") {
               prize = bet * 2;
               profile.balance += prize;
-              message = `\u{1F389} \u0412\u042B \u0412\u042B\u0418\u0413\u0420\u0410\u041B\u0418! \u0412\u0430\u0448\u0438 [${finalPlayerHand.name}] \u0443\u0434\u0435\u043B\u0430\u043B\u0438 \u043A\u043E\u0441\u0442\u0438 \u0431\u0430\u0440\u043C\u0435\u043D\u0430 [${finalBotHand.name}]! +${bet} RU!`;
-              appendSystemMessage(`\u{1F389} \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${username} \u0432\u044B\u0438\u0433\u0440\u0430\u043B +${bet} RU \u0443 \u0431\u0430\u0440\u043C\u0435\u043D\u0430 \u0432 \u041A\u043E\u0441\u0442\u0438 \u0441\u043E \u0441\u0447\u0435\u0442\u043E\u043C [${finalPlayerHand.name}]!`, "success");
+              message = `\u{1F389} \u0412\u042B \u0412\u042B\u0418\u0413\u0420\u0410\u041B\u0418! \u0412\u0430\u0448\u0438 [${finalPlayerHand.name}] \u0443\u0434\u0435\u043B\u0430\u043B\u0438 \u043A\u043E\u0441\u0442\u0438 \u0431\u0430\u0440\u043C\u0435\u043D\u0430 [${finalBotHand.name}]! +${formatCredits(bet)}!`;
+              appendSystemMessage(`\u{1F389} \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${username} \u0432\u044B\u0438\u0433\u0440\u0430\u043B +${formatCredits(bet)} \u0443 \u0431\u0430\u0440\u043C\u0435\u043D\u0430 \u0432 \u041A\u043E\u0441\u0442\u0438 \u0441\u043E \u0441\u0447\u0435\u0442\u043E\u043C [${finalPlayerHand.name}]!`, "success");
             } else if (result === "lose") {
               prize = 0;
               message = `\u{1F4B8} \u0423\u0432\u044B! \u0411\u0430\u0440\u043C\u0435\u043D \u043E\u0431\u044B\u0433\u0440\u0430\u043B \u0432\u0430\u0441 \u0441\u0432\u043E\u0435\u0439 \u0440\u0443\u043A\u043E\u0439 [${finalBotHand.name}] \u043F\u0440\u043E\u0442\u0438\u0432 \u0432\u0430\u0448\u0438\u0445 [${finalPlayerHand.name}].`;
@@ -1245,6 +1899,10 @@ wss.on("connection", (ws) => {
           const { playerId, username, contestantName, betAmount } = payload;
           const profile = playerDb[playerId];
           if (!profile) return;
+          if (!activeRace.contestants.some((contestant) => contestant.name === contestantName)) {
+            sendError(ws, "\u0412\u044B\u0431\u0440\u0430\u043D\u043D\u044B\u0439 \u0443\u0447\u0430\u0441\u0442\u043D\u0438\u043A \u0437\u0430\u0431\u0435\u0433\u0430 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D.");
+            return;
+          }
           if (activeRace.status !== "betting" && activeRace.status !== "none") {
             ws.send(JSON.stringify({ type: "NOTIFICATION", payload: { text: "\u274C \u0421\u0442\u0430\u0432\u043A\u0438 \u043D\u0430 \u044D\u0442\u043E\u0442 \u0437\u0430\u0435\u0437\u0434 \u0443\u0436\u0435 \u0437\u0430\u043A\u0440\u044B\u0442\u044B!", type: "danger" } }));
             return;
@@ -1257,7 +1915,7 @@ wss.on("connection", (ws) => {
           profile.balance -= betAmount;
           savePlayerDb();
           activeRace.bets.push({ playerId, username, contestantName, betAmount });
-          activeRace.log.push(`\u{1F4DD} \u0421\u0442\u0430\u0432\u043A\u0430: ${username} \u0437\u0430\u0440\u044F\u0434\u0438\u043B ${betAmount} RU \u043D\u0430 "${contestantName}"`);
+          activeRace.log.push(`\u{1F4DD} \u0421\u0442\u0430\u0432\u043A\u0430: ${username} \u0437\u0430\u0440\u044F\u0434\u0438\u043B ${formatCredits(betAmount)} \u043D\u0430 "${contestantName}"`);
           broadcastTavernGames();
           break;
         }
@@ -1296,7 +1954,7 @@ wss.on("connection", (ws) => {
           activeRace.log = [`\u{1F3C1} \u041A\u0423\u0420\u0410\u0422\u041E\u0420 \u0414\u0410\u041B \u0421\u0422\u0410\u0420\u0422 \u0417\u0410\u0411\u0415\u0413\u0423! \u0417\u0432\u0435\u0440\u0438 \u0440\u0438\u043D\u0443\u043B\u0438\u0441\u044C \u0432\u043F\u0435\u0440\u0435\u0434!`];
           appendSystemMessage(`\u{1F3C1} \u041D\u0410\u0427\u0410\u041B\u0418\u0421\u042C \u041F\u041E\u0414\u041F\u041E\u041B\u042C\u041D\u042B\u0415 \u0421\u041A\u0410\u0427\u041A\u0418 \u0422\u0410\u0412\u0415\u0420\u041D\u042B! \u0422\u0432\u0430\u0440\u0438 \u043F\u0443\u0449\u0435\u043D\u044B!`, "warning");
           broadcastTavernGames();
-          const raceInterval = setInterval(() => {
+          activeRaceInterval = setInterval(() => {
             activeRace.tickCount++;
             let finishReached = false;
             activeRace.contestants.forEach((c) => {
@@ -1347,7 +2005,10 @@ wss.on("connection", (ws) => {
               activeRace.log.push(`\u{1F3C3} \u041B\u0438\u0434\u0435\u0440 \u0437\u0430\u0431\u0435\u0433\u0430: "${sorted[0].name}" (\u043F\u0440\u043E\u0439\u0434\u0435\u043D\u043E ${sorted[0].position}%)`);
             }
             if (finishReached) {
-              clearInterval(raceInterval);
+              if (activeRaceInterval) {
+                clearInterval(activeRaceInterval);
+                activeRaceInterval = null;
+              }
               const finalSorted = [...activeRace.contestants].sort((a, b) => b.position - a.position);
               const winner = finalSorted[0];
               activeRace.winner = winner.name;
@@ -1359,8 +2020,8 @@ wss.on("connection", (ws) => {
                   const winnings = Math.floor(b.betAmount * winner.odds);
                   if (playerDb[b.playerId]) {
                     playerDb[b.playerId].balance += winnings;
-                    activeRace.log.push(`\u{1F4B0} ${b.username} \u0437\u0430\u0431\u0438\u0440\u0430\u0435\u0442 \u0432\u044B\u043F\u043B\u0430\u0442\u0443: +${winnings} RU (\u043A\u044D\u0444 ${winner.odds}x)!`);
-                    appendSystemMessage(`\u{1F4B0} \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${b.username} \u0441\u043E\u0440\u0432\u0430\u043B \u043A\u0443\u0448 \u0432 ${winnings} RU \u043D\u0430 "${winner.name}"!`, "loot");
+                    activeRace.log.push(`\u{1F4B0} ${b.username} \u0437\u0430\u0431\u0438\u0440\u0430\u0435\u0442 \u0432\u044B\u043F\u043B\u0430\u0442\u0443: +${formatCredits(winnings)} (\u043A\u044D\u0444 ${winner.odds}x)!`);
+                    appendSystemMessage(`\u{1F4B0} \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${b.username} \u0441\u043E\u0440\u0432\u0430\u043B \u043A\u0443\u0448 \u0432 ${formatCredits(winnings)} \u043D\u0430 "${winner.name}"!`, "loot");
                   }
                 } else {
                   activeRace.log.push(`\u{1F940} ${b.username} \u043F\u0440\u043E\u0438\u0433\u0440\u0430\u043B \u0441\u0432\u043E\u044E \u0441\u0442\u0430\u0432\u043A\u0443 \u043D\u0430 ${b.contestantName}`);
@@ -1375,6 +2036,10 @@ wss.on("connection", (ws) => {
         case "RACE_RESET_GM": {
           const player = clients.get(ws);
           if (!player || player.role !== "gm") return;
+          if (activeRaceInterval) {
+            clearInterval(activeRaceInterval);
+            activeRaceInterval = null;
+          }
           activeRace.status = "none";
           activeRace.bets = [];
           activeRace.winner = null;
@@ -1387,7 +2052,7 @@ wss.on("connection", (ws) => {
           if (!tavernSettings.enabledGames.trades) {
             const player = clients.get(ws);
             if (!player || player.role !== "gm") {
-              ws.send(JSON.stringify({ type: "NOTIFICATION", payload: { text: "\u274C \u0422\u043E\u0440\u0433\u043E\u0432\u0430\u044F \u0441\u043A\u0443\u043F\u043A\u0430 \u0421\u0438\u0434\u043E\u0440\u043E\u0432\u0438\u0447\u0430 \u0432\u0440\u0435\u043C\u0435\u043D\u043D\u043E \u0437\u0430\u043A\u0440\u044B\u0442\u0430 \u043A\u0443\u0440\u0430\u0442\u043E\u0440\u043E\u043C!", type: "danger" } }));
+              ws.send(JSON.stringify({ type: "NOTIFICATION", payload: { text: `\u274C \u0421\u043A\u0443\u043F\u043A\u0430 \u0443 \u0442\u043E\u0440\u0433\u043E\u0432\u0446\u0430 ${tavernSettings.merchantName || "\u0421\u0438\u0434\u043E\u0440\u043E\u0432\u0438\u0447"} \u0432\u0440\u0435\u043C\u0435\u043D\u043D\u043E \u043F\u0440\u0438\u043E\u0441\u0442\u0430\u043D\u043E\u0432\u043B\u0435\u043D\u0430 \u043A\u0443\u0440\u0430\u0442\u043E\u0440\u043E\u043C!`, type: "danger" } }));
               return;
             }
           }
@@ -1397,9 +2062,12 @@ wss.on("connection", (ws) => {
           if (!map || !map.inventory || !map.inventory[itemIndex]) return;
           const itemName = map.inventory[itemIndex];
           let price = 200;
+          const matchingShopItem = shopItems.find((item) => item.name === itemName);
           const artifactNames = ["\u041A\u0430\u043F\u043B\u044F", "\u041A\u0440\u043E\u0432\u044C \u043A\u0430\u043C\u043D\u044F", "\u0421\u043B\u0438\u0437\u044C", "\u041A\u043E\u043B\u044E\u0447\u043A\u0430", "\u041C\u0435\u0434\u0443\u0437\u0430", "\u0412\u0441\u043F\u044B\u0448\u043A\u0430", "\u041A\u0440\u0438\u0441\u0442\u0430\u043B\u043B", "\u0411\u0435\u043D\u0433\u0430\u043B\u044C\u0441\u043A\u0438\u0439 \u043E\u0433\u043E\u043D\u044C", "\u041D\u043E\u0447\u043D\u043E\u0439 \u0421\u0432\u0435\u0442\u043E\u0447"];
           const isArtifact = artifactNames.some((art) => itemName.includes(art));
-          if (isArtifact) {
+          if (matchingShopItem) {
+            price = Math.max(1, Math.floor(matchingShopItem.price * 0.5));
+          } else if (isArtifact) {
             price = Math.floor(Math.random() * 400) + 600;
           } else {
             price = Math.floor(Math.random() * 100) + 150;
@@ -1407,7 +2075,7 @@ wss.on("connection", (ws) => {
           profile.balance += price;
           savePlayerDb();
           map.inventory.splice(itemIndex, 1);
-          appendSystemMessage(`\u{1F91D} \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${username} \u0441\u0434\u0430\u043B \u0421\u0438\u0434\u043E\u0440\u043E\u0432\u0438\u0447\u0443 \u0445\u0430\u0431\u0430\u0440: "${itemName}" \u0437\u0430 ${price} RU!`, "loot");
+          appendSystemMessage(`\u{1F91D} \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${username} \u0441\u0434\u0430\u043B \u0442\u043E\u0440\u0433\u043E\u0432\u0446\u0443 ${tavernSettings.merchantName || "\u0421\u0438\u0434\u043E\u0440\u043E\u0432\u0438\u0447"} \u0445\u0430\u0431\u0430\u0440: "${itemName}" \u0437\u0430 ${formatCredits(price)}!`, "loot");
           broadcast("SYNC_APP_STATE", { map, gameState, messages });
           broadcastTavernGames();
           break;
@@ -1420,7 +2088,7 @@ wss.on("connection", (ws) => {
           if (profile) {
             profile.balance = Math.max(0, profile.balance + delta);
             savePlayerDb();
-            appendSystemMessage(`\u2699\uFE0F \u0421\u0438\u0441\u0442\u0435\u043C\u0430: \u0411\u0430\u043B\u0430\u043D\u0441 \u0438\u0433\u0440\u043E\u043A\u0430 \u0431\u044B\u043B \u043E\u0442\u0440\u0435\u0433\u0443\u043B\u0438\u0440\u043E\u0432\u0430\u043D \u043A\u0443\u0440\u0430\u0442\u043E\u0440\u043E\u043C \u043D\u0430 ${delta > 0 ? "+" : ""}${delta} RU.`, "info");
+            appendSystemMessage(`\u2699\uFE0F \u0421\u0438\u0441\u0442\u0435\u043C\u0430: \u0411\u0430\u043B\u0430\u043D\u0441 \u0438\u0433\u0440\u043E\u043A\u0430 \u0431\u044B\u043B \u043E\u0442\u0440\u0435\u0433\u0443\u043B\u0438\u0440\u043E\u0432\u0430\u043D \u043A\u0443\u0440\u0430\u0442\u043E\u0440\u043E\u043C \u043D\u0430 ${delta > 0 ? "+" : ""}${formatCredits(Math.abs(delta))}.`, "info");
             broadcastTavernGames();
           }
           break;
@@ -1433,7 +2101,7 @@ wss.on("connection", (ws) => {
           if (profile) {
             profile.balance = Math.max(0, parseInt(balance, 10) || 0);
             savePlayerDb();
-            appendSystemMessage(`\u{1F6E1}\uFE0F \u0411\u0430\u0437\u0430 \u0434\u0430\u043D\u043D\u044B\u0445: \u041A\u0443\u0440\u0430\u0442\u043E\u0440 \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u0438\u043B \u0431\u0430\u043B\u0430\u043D\u0441 \u0443 \u0438\u0433\u0440\u043E\u043A\u0430 \u043D\u0430 ${profile.balance} RU.`, "info");
+            appendSystemMessage(`\u{1F6E1}\uFE0F \u0411\u0430\u0437\u0430 \u0434\u0430\u043D\u043D\u044B\u0445: \u041A\u0443\u0440\u0430\u0442\u043E\u0440 \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u0438\u043B \u0431\u0430\u043B\u0430\u043D\u0441 \u0443 \u0438\u0433\u0440\u043E\u043A\u0430 \u0432 \u0440\u0430\u0437\u043C\u0435\u0440\u0435 ${formatCredits(profile.balance)}.`, "info");
             broadcastTavernGames();
           }
           break;
@@ -1475,16 +2143,21 @@ wss.on("connection", (ws) => {
           const player = clients.get(ws);
           if (!player || player.role !== "gm") return;
           const { name, price, type: type2, description } = payload;
+          const parsedPrice = Number(price);
+          if (typeof name !== "string" || !name.trim() || !isPositiveCreditAmount(parsedPrice)) {
+            sendError(ws, "\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435 \u0442\u043E\u0432\u0430\u0440\u0430 \u0438 \u043F\u043E\u043B\u043E\u0436\u0438\u0442\u0435\u043B\u044C\u043D\u0430\u044F \u0446\u0435\u043B\u0430\u044F \u0446\u0435\u043D\u0430 \u043E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u044B.");
+            return;
+          }
           const newItem = {
             id: "item_" + Math.random().toString(36).substring(2, 9),
-            name,
-            price: parseInt(price, 10) || 120,
+            name: name.trim().slice(0, 100),
+            price: parsedPrice,
             type: type2 || "misc",
             description: description || "\u0421\u043F\u0435\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0437\u0430\u043A\u0430\u0437 \u041A\u041F\u041A"
           };
           shopItems.push(newItem);
           saveShopItems();
-          appendSystemMessage(`\u{1F6D2} \u0422\u043E\u0440\u0433\u043E\u0432\u043B\u044F: \u041A\u0443\u0440\u0430\u0442\u043E\u0440 \u0434\u043E\u0431\u0430\u0432\u0438\u043B \u043D\u043E\u0432\u044B\u0439 \u0442\u043E\u0432\u0430\u0440 \u0443 \u0421\u0438\u0434\u043E\u0440\u043E\u0432\u0438\u0447\u0430: "${name}" \u0437\u0430 ${price} RU!`, "info");
+          appendSystemMessage(`\u{1F6D2} \u0422\u043E\u0440\u0433\u043E\u0432\u043B\u044F: \u041A\u0443\u0440\u0430\u0442\u043E\u0440 \u0434\u043E\u0431\u0430\u0432\u0438\u043B \u043D\u043E\u0432\u044B\u0439 \u0442\u043E\u0432\u0430\u0440 \u043D\u0430 \u043F\u0440\u0438\u043B\u0430\u0432\u043E\u043A ${tavernSettings.merchantName || "\u0421\u0438\u0434\u043E\u0440\u043E\u0432\u0438\u0447"}: "${name}" \u0437\u0430 ${formatCredits(newItem.price)}!`, "info");
           broadcastTavernGames();
           break;
         }
@@ -1496,7 +2169,7 @@ wss.on("connection", (ws) => {
           if (found) {
             shopItems = shopItems.filter((i) => i.id !== itemId);
             saveShopItems();
-            appendSystemMessage(`\u{1F5D1}\uFE0F \u0422\u043E\u0440\u0433\u043E\u0432\u043B\u044F: \u041A\u0443\u0440\u0430\u0442\u043E\u0440 \u0443\u0431\u0440\u0430\u043B \u0442\u043E\u0432\u0430\u0440 "${found.name}" \u0441 \u043F\u0440\u0438\u043B\u0430\u0432\u043A\u0430 \u0421\u0438\u0434\u043E\u0440\u043E\u0432\u0438\u0447\u0430.`, "info");
+            appendSystemMessage(`\u{1F5D1}\uFE0F \u0422\u043E\u0440\u0433\u043E\u0432\u043B\u044F: \u041A\u0443\u0440\u0430\u0442\u043E\u0440 \u0443\u0431\u0440\u0430\u043B \u0442\u043E\u0432\u0430\u0440 "${found.name}" \u0441 \u043F\u0440\u0438\u043B\u0430\u0432\u043A\u0430 ${tavernSettings.merchantName || "\u0421\u0438\u0434\u043E\u0440\u043E\u0432\u0438\u0447"}.`, "info");
             broadcastTavernGames();
           }
           break;
@@ -1504,10 +2177,14 @@ wss.on("connection", (ws) => {
         case "GM_UPDATE_TAVERN_SETTINGS": {
           const player = clients.get(ws);
           if (!player || player.role !== "gm") return;
-          const { tavernName, enabledGames } = payload;
+          const { tavernName, merchantName, enabledGames } = payload;
           if (tavernName !== void 0) {
             tavernSettings.tavernName = tavernName;
             appendSystemMessage(`\u2699\uFE0F \u0417\u0430\u0432\u0435\u0434\u0435\u043D\u0438\u0435: \u0411\u0430\u0440 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u043D \u0432 "${tavernName}"`, "warning");
+          }
+          if (merchantName !== void 0) {
+            tavernSettings.merchantName = merchantName;
+            appendSystemMessage(`\u2699\uFE0F \u0417\u0430\u0432\u0435\u0434\u0435\u043D\u0438\u0435: \u0422\u043E\u0440\u0433\u043E\u0432\u0435\u0446 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u043D \u0432 "${merchantName}"`, "warning");
           }
           if (enabledGames !== void 0) {
             tavernSettings.enabledGames = enabledGames;
@@ -1521,7 +2198,7 @@ wss.on("connection", (ws) => {
           if (!tavernSettings.enabledGames.trades) {
             const player = clients.get(ws);
             if (!player || player.role !== "gm") {
-              ws.send(JSON.stringify({ type: "NOTIFICATION", payload: { text: "\u274C \u0422\u043E\u0440\u0433\u043E\u0432\u0430\u044F \u043B\u0430\u0432\u043A\u0430 \u0421\u0438\u0434\u043E\u0440\u043E\u0432\u0438\u0447\u0430 \u0432\u0440\u0435\u043C\u0435\u043D\u043D\u043E \u0437\u0430\u043A\u0440\u044B\u0442\u0430 \u043A\u0443\u0440\u0430\u0442\u043E\u0440\u043E\u043C!", type: "danger" } }));
+              ws.send(JSON.stringify({ type: "NOTIFICATION", payload: { text: `\u274C \u0422\u043E\u0440\u0433\u043E\u0432\u0430\u044F \u043B\u0430\u0432\u043A\u0430 ${tavernSettings.merchantName || "\u0421\u0438\u0434\u043E\u0440\u043E\u0432\u0438\u0447\u0430"} \u0432\u0440\u0435\u043C\u0435\u043D\u043D\u043E \u0437\u0430\u043A\u0440\u044B\u0442\u0430 \u043A\u0443\u0440\u0430\u0442\u043E\u0440\u043E\u043C!`, type: "danger" } }));
               return;
             }
           }
@@ -1529,6 +2206,10 @@ wss.on("connection", (ws) => {
           const profile = playerDb[playerId];
           const item = shopItems.find((i) => i.id === itemId);
           if (!profile || !item) return;
+          if (!isPositiveCreditAmount(item.price)) {
+            sendError(ws, "\u0423 \u0442\u043E\u0432\u0430\u0440\u0430 \u0443\u043A\u0430\u0437\u0430\u043D\u0430 \u043D\u0435\u043A\u043E\u0440\u0440\u0435\u043A\u0442\u043D\u0430\u044F \u0446\u0435\u043D\u0430.");
+            return;
+          }
           if (profile.balance < item.price) {
             ws.send(JSON.stringify({ type: "NOTIFICATION", payload: { text: "\u274C \u041D\u0435\u0434\u043E\u0441\u0442\u0430\u0442\u043E\u0447\u043D\u043E \u0441\u0440\u0435\u0434\u0441\u0442\u0432 \u043D\u0430 \u0441\u0447\u0435\u0442\u0435 \u041A\u041F\u041A!", type: "danger" } }));
             return;
@@ -1543,7 +2224,7 @@ wss.on("connection", (ws) => {
             map.inventory = [];
           }
           map.inventory.push(item.name);
-          appendSystemMessage(`\u{1F6D2} \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${username} \u043A\u0443\u043F\u0438\u043B \u0443 \u0421\u0438\u0434\u043E\u0440\u043E\u0432\u0438\u0447\u0430: "${item.name}" \u0437\u0430 ${item.price} RU!`, "loot");
+          appendSystemMessage(`\u{1F6D2} \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${username} \u043A\u0443\u043F\u0438\u043B \u0443 ${tavernSettings.merchantName || "\u0421\u0438\u0434\u043E\u0440\u043E\u0432\u0438\u0447\u0430"}: "${item.name}" \u0437\u0430 ${formatCredits(item.price)}!`, "loot");
           broadcast("SYNC_APP_STATE", { map, gameState, messages });
           broadcastTavernGames();
           break;
@@ -1578,7 +2259,7 @@ wss.on("connection", (ws) => {
           const activeClient = clients.get(ws);
           const activeUsername = activeClient ? activeClient.username : "\u0421\u0442\u0430\u043B\u043A\u0435\u0440";
           if (profile.balance < bet) {
-            ws.send(JSON.stringify({ type: "NOTIFICATION", payload: { text: "\u274C \u041D\u0435\u0434\u043E\u0441\u0442\u0430\u0442\u043E\u0447\u043D\u043E RU \u043D\u0430 \u0431\u0430\u043B\u0430\u043D\u0441\u0435!", type: "danger" } }));
+            ws.send(JSON.stringify({ type: "NOTIFICATION", payload: { text: "\u274C \u041D\u0435\u0434\u043E\u0441\u0442\u0430\u0442\u043E\u0447\u043D\u043E \u0441\u0440\u0435\u0434\u0441\u0442\u0432 \u043D\u0430 \u0431\u0430\u043B\u0430\u043D\u0441\u0435 \u041A\u041F\u041A!", type: "danger" } }));
             return;
           }
           profile.balance -= bet;
@@ -1635,11 +2316,11 @@ wss.on("connection", (ws) => {
             payload: {
               reels,
               winAmount,
-              message: winAmount > 0 ? `\u{1F389} \u041F\u041E\u0411\u0415\u0414\u0410! \u0412\u044B \u0432\u044B\u0431\u0438\u043B\u0438 [${combinationName}] \u0438 \u0432\u044B\u0438\u0433\u0440\u0430\u043B\u0438 +${winAmount} RU!` : `\u{1F4B8} \u0423\u0432\u044B! \u0412\u044B\u043F\u0430\u043B\u043E: ${reels.join(" | ")}. \u041D\u0438 \u0435\u0434\u0438\u043D\u043E\u0439 \u0437\u0430\u0446\u0435\u043F\u043A\u0438. \u041F\u043E\u043F\u0440\u043E\u0431\u0443\u0439\u0442\u0435 \u0435\u0449\u0435 \u0440\u0430\u0437!`
+              message: winAmount > 0 ? `\u{1F389} \u041F\u041E\u0411\u0415\u0414\u0410! \u0412\u044B \u0432\u044B\u0431\u0438\u043B\u0438 [${combinationName}] \u0438 \u0432\u044B\u0438\u0433\u0440\u0430\u043B\u0438 +${formatCredits(winAmount)}!` : `\u{1F4B8} \u0423\u0432\u044B! \u0412\u044B\u043F\u0430\u043B\u043E: ${reels.join(" | ")}. \u041D\u0438 \u0435\u0434\u0438\u043D\u043E\u0439 \u0437\u0430\u0446\u0435\u043F\u043A\u0438. \u041F\u043E\u043F\u0440\u043E\u0431\u0443\u0439\u0442\u0435 \u0435\u0449\u0435 \u0440\u0430\u0437!`
             }
           }));
           if (winAmount >= bet * 5) {
-            appendSystemMessage(`\u{1F3B0} \u0421\u043B\u043E\u0442-\u041C\u0430\u0448\u0438\u043D\u0430: \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${activeUsername} \u0441\u043E\u0440\u0432\u0430\u043B \u043A\u0443\u0448 \u0432 \u0440\u0430\u0437\u043C\u0435\u0440\u0435 ${winAmount} RU \u043D\u0430 \u0430\u0432\u0442\u043E\u043C\u0430\u0442\u0435 (\xAB${combinationName}\xBB)!`, "success");
+            appendSystemMessage(`\u{1F3B0} \u0421\u043B\u043E\u0442-\u041C\u0430\u0448\u0438\u043D\u0430: \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${activeUsername} \u0441\u043E\u0440\u0432\u0430\u043B \u043A\u0443\u0448 \u0432 \u0440\u0430\u0437\u043C\u0435\u0440\u0435 ${formatCredits(winAmount)} \u043D\u0430 \u0430\u0432\u0442\u043E\u043C\u0430\u0442\u0435 (\xAB${combinationName}\xBB)!`, "success");
           }
           broadcastTavernGames();
           break;
@@ -1655,6 +2336,11 @@ wss.on("connection", (ws) => {
           const { playerId, betAmount, betType, betValue } = payload;
           const profile = playerDb[playerId];
           if (!profile) return;
+          const validRouletteBet = betType === "number" && Number.isInteger(Number(betValue)) && Number(betValue) >= 0 && Number(betValue) <= 36 || betType === "color" && ["red", "black"].includes(betValue) || betType === "parity" && ["even", "odd"].includes(betValue);
+          if (!validRouletteBet) {
+            sendError(ws, "\u041D\u0435\u043A\u043E\u0440\u0440\u0435\u043A\u0442\u043D\u044B\u0439 \u0442\u0438\u043F \u0438\u043B\u0438 \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435 \u0441\u0442\u0430\u0432\u043A\u0438 \u0432 \u0440\u0443\u043B\u0435\u0442\u043A\u0435.");
+            return;
+          }
           const activeClient = clients.get(ws);
           const activeUsername = activeClient ? activeClient.username : "\u0421\u0442\u0430\u043B\u043A\u0435\u0440";
           if (profile.balance < betAmount) {
@@ -1701,11 +2387,11 @@ wss.on("connection", (ws) => {
               winningNumber,
               winningColor: color,
               winAmount,
-              message: winAmount > 0 ? `\u{1F3AF} \u0412\u042B\u0418\u0413\u0420\u042B\u0428! \u0412\u044B\u043F\u0430\u043B\u043E ${colorLabel}. \u0412\u0430\u0448\u0430 \u0441\u0442\u0430\u0432\u043A\u0430 \u043F\u0440\u0438\u043D\u0435\u0441\u043B\u0430 \u0432\u0430\u043C +${winAmount} RU!` : `\u{1F4B8} \u041F\u0420\u041E\u0418\u0413\u0420\u042B\u0428! \u0412\u044B\u043F\u0430\u043B\u043E ${colorLabel}. \u0423\u0434\u0430\u0447\u0430 \u0443\u0441\u043A\u043E\u043B\u044C\u0437\u043D\u0443\u043B\u0430 \u0433\u043B\u0443\u0431\u043E\u043A\u043E \u043F\u043E\u0434 \u0440\u0430\u0434\u0430\u0440.`
+              message: winAmount > 0 ? `\u{1F3AF} \u0412\u042B\u0418\u0413\u0420\u042B\u0428! \u0412\u044B\u043F\u0430\u043B\u043E ${colorLabel}. \u0412\u0430\u0448\u0430 \u0441\u0442\u0430\u0432\u043A\u0430 \u043F\u0440\u0438\u043D\u0435\u0441\u043B\u0430 \u0432\u0430\u043C +${formatCredits(winAmount)}!` : `\u{1F4B8} \u041F\u0420\u041E\u0418\u0413\u0420\u042B\u0428! \u0412\u044B\u043F\u0430\u043B\u043E ${colorLabel}. \u0423\u0434\u0430\u0447\u0430 \u0443\u0441\u043A\u043E\u043B\u044C\u0437\u043D\u0443\u043B\u0430 \u0433\u043B\u0443\u0431\u043E\u043A\u043E \u043F\u043E\u0434 \u0440\u0430\u0434\u0430\u0440.`
             }
           }));
           if (winAmount >= betAmount * 5) {
-            appendSystemMessage(`\u{1F3A1} \u0420\u0443\u043B\u0435\u0442\u043A\u0430: \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${activeUsername} \u043F\u043E\u0441\u0442\u0430\u0432\u0438\u043B \u043D\u0430 "${betValue}" \u0438 \u043F\u043E\u0434\u043D\u044F\u043B +${winAmount} RU \u043D\u0430 \u0440\u0430\u0434\u0430\u0440-\u0440\u0443\u043B\u0435\u0442\u043A\u0435! \u0412\u044B\u043F\u0430\u043B\u043E: ${colorLabel}`, "success");
+            appendSystemMessage(`\u{1F3A1} \u0420\u0443\u043B\u0435\u0442\u043A\u0430: \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${activeUsername} \u043F\u043E\u0441\u0442\u0430\u0432\u0438\u043B \u043D\u0430 "${betValue}" \u0438 \u043F\u043E\u0434\u043D\u044F\u043B +${formatCredits(winAmount)} \u043D\u0430 \u0440\u0430\u0434\u0430\u0440-\u0440\u0443\u043B\u0435\u0442\u043A\u0435! \u0412\u044B\u043F\u0430\u043B\u043E: ${colorLabel}`, "success");
           }
           broadcastTavernGames();
           break;
@@ -1721,6 +2407,10 @@ wss.on("connection", (ws) => {
           const { playerId, bet, score } = payload;
           const profile = playerDb[playerId];
           if (!profile) return;
+          if (!Number.isSafeInteger(score) || score < 0 || score > 1e4) {
+            sendError(ws, "\u041D\u0435\u043A\u043E\u0440\u0440\u0435\u043A\u0442\u043D\u044B\u0439 \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442 \u0441\u0442\u0440\u0435\u043B\u044C\u0431\u044B.");
+            return;
+          }
           const activeClient = clients.get(ws);
           const activeUsername = activeClient ? activeClient.username : "\u0421\u0442\u0430\u043B\u043A\u0435\u0440";
           if (profile.balance < bet) {
@@ -1752,11 +2442,120 @@ wss.on("connection", (ws) => {
             type: "SHOOTING_RANGE_RESULT",
             payload: {
               winAmount,
-              message: winAmount > 0 ? `\u{1F396}\uFE0F \u0420\u0415\u0417\u0423\u041B\u042C\u0422\u0410\u0422: \u041D\u0430\u0431\u0440\u0430\u043D\u043E ${score} \u043E\u0447\u043A\u043E\u0432 (\u0417\u0432\u0430\u043D\u0438\u0435: ${rank}). \u0412\u044B \u043F\u043E\u043B\u0443\u0447\u0438\u043B\u0438 \u0432\u044B\u043F\u043B\u0430\u0442\u0443 +${winAmount} RU!` : `\u274C \u0420\u0415\u0417\u0423\u041B\u042C\u0422\u0410\u0422: \u041D\u0430\u0431\u0440\u0430\u043D\u043E ${score} \u043E\u0447\u043A\u043E\u0432. \u0421\u043B\u0438\u0448\u043A\u043E\u043C \u043C\u043D\u043E\u0433\u043E \u043F\u0440\u043E\u043C\u0430\u0445\u043E\u0432 (\u0417\u0432\u0430\u043D\u0438\u0435: ${rank}). \u0421\u0442\u0430\u0432\u043A\u0430 \u0443\u0448\u043B\u0430 \u0431\u0430\u0440\u043C\u0435\u043D\u0443.`
+              message: winAmount > 0 ? `\u{1F396}\uFE0F \u0420\u0415\u0417\u0423\u041B\u042C\u0422\u0410\u0422: \u041D\u0430\u0431\u0440\u0430\u043D\u043E ${score} \u043E\u0447\u043A\u043E\u0432 (\u0417\u0432\u0430\u043D\u0438\u0435: ${rank}). \u0412\u044B \u043F\u043E\u043B\u0443\u0447\u0438\u043B\u0438 \u0432\u044B\u043F\u043B\u0430\u0442\u0443 +${formatCredits(winAmount)}!` : `\u274C \u0420\u0415\u0417\u0423\u041B\u042C\u0422\u0410\u0422: \u041D\u0430\u0431\u0440\u0430\u043D\u043E ${score} \u043E\u0447\u043A\u043E\u0432. \u0421\u043B\u0438\u0448\u043A\u043E\u043C \u043C\u043D\u043E\u0433\u043E \u043F\u0440\u043E\u043C\u0430\u0445\u043E\u0432 (\u0417\u0432\u0430\u043D\u0438\u0435: ${rank}). \u0421\u0442\u0430\u0432\u043A\u0430 \u0443\u0448\u043B\u0430 \u0431\u0430\u0440\u043C\u0435\u043D\u0443.`
             }
           }));
           if (winAmount >= bet * 1.5) {
-            appendSystemMessage(`\u{1F3AF} \u0422\u0438\u0440: \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${activeUsername} \u043F\u0440\u043E\u0448\u0435\u043B \u0431\u043E\u0435\u0432\u0443\u044E \u0442\u0440\u0435\u043D\u0438\u0440\u043E\u0432\u043A\u0443 \u0432 \u0422\u0438\u0440\u0435 \u0441 \u0440\u0430\u043D\u0433\u043E\u043C [${rank}] \u0438 \u0432\u044B\u0438\u0433\u0440\u0430\u043B +${winAmount} RU!`, "success");
+            appendSystemMessage(`\u{1F3AF} \u0422\u0438\u0440: \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${activeUsername} \u043F\u0440\u043E\u0448\u0435\u043B \u0431\u043E\u0435\u0432\u0443\u044E \u0442\u0440\u0435\u043D\u0438\u0440\u043E\u0432\u043A\u0443 \u0432 \u0422\u0438\u0440\u0435 \u0441 \u0440\u0430\u043D\u0433\u043E\u043C [${rank}] \u0438 \u0432\u044B\u0438\u0433\u0440\u0430\u043B +${formatCredits(winAmount)}!`, "success");
+          }
+          broadcastTavernGames();
+          break;
+        }
+        case "THIMBLERIG_PLAY": {
+          if (!tavernSettings.enabledGames.thimblerig) {
+            ws.send(JSON.stringify({ type: "NOTIFICATION", payload: { text: "\u274C \u041D\u0430\u043F\u0451\u0440\u0441\u0442\u043A\u0438 \u0432\u0440\u0435\u043C\u0435\u043D\u043D\u043E \u043E\u0442\u043A\u043B\u044E\u0447\u0435\u043D\u044B \u043A\u0443\u0440\u0430\u0442\u043E\u0440\u043E\u043C!", type: "danger" } }));
+            return;
+          }
+          const { playerId, bet, chosenCup } = payload;
+          const profile = playerDb[playerId];
+          if (!profile) return;
+          if (!Number.isInteger(chosenCup) || chosenCup < 0 || chosenCup > 2) {
+            sendError(ws, "\u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u043E\u0434\u0438\u043D \u0438\u0437 \u0442\u0440\u0451\u0445 \u043D\u0430\u043F\u0451\u0440\u0441\u0442\u043A\u043E\u0432.");
+            return;
+          }
+          const activeClient = clients.get(ws);
+          const activeUsername = activeClient ? activeClient.username : "\u0421\u0442\u0430\u043B\u043A\u0435\u0440";
+          if (profile.balance < bet) {
+            ws.send(JSON.stringify({ type: "NOTIFICATION", payload: { text: "\u274C \u041D\u0435\u0434\u043E\u0441\u0442\u0430\u0442\u043E\u0447\u043D\u043E \u0441\u0440\u0435\u0434\u0441\u0442\u0432 \u043D\u0430 \u0431\u0430\u043B\u0430\u043D\u0441\u0435 \u041A\u041F\u041A!", type: "danger" } }));
+            return;
+          }
+          profile.balance -= bet;
+          const winningCup = Math.floor(Math.random() * 3);
+          const win = chosenCup === winningCup;
+          const winAmount = win ? Math.floor(bet * 2.8) : 0;
+          if (winAmount > 0) {
+            profile.balance += winAmount;
+          }
+          savePlayerDb();
+          ws.send(JSON.stringify({
+            type: "THIMBLERIG_RESULT",
+            payload: {
+              winningCup,
+              chosenCup,
+              winAmount,
+              message: winAmount > 0 ? `\u{1F389} \u041A\u0443\u0440\u0430\u0436! \u041D\u0430\u043F\u0451\u0440\u0441\u0442\u043E\u0447\u043D\u0438\u043A \u043D\u0435\u0434\u043E\u0433\u043B\u044F\u0434\u0435\u043B! \u0428\u0430\u0440\u0438\u043A \u043F\u043E\u0434 \u0441\u0442\u0430\u043A\u0430\u043D\u043E\u043C #${winningCup + 1}. \u0412\u044B \u043F\u043E\u0434\u043D\u044F\u043B\u0438 +${formatCredits(winAmount)}!` : `\u{1F4B8} \u0423\u0432\u044B! \u041F\u0443\u0441\u0442\u043E! \u0428\u0430\u0440\u0438\u043A \u043E\u043A\u0430\u0437\u0430\u043B\u0441\u044F \u043F\u043E\u0434 \u0441\u0442\u0430\u043A\u0430\u043D\u043E\u043C #${winningCup + 1}. \u041F\u043E\u043F\u0440\u043E\u0431\u0443\u0439\u0442\u0435 \u0435\u0449\u0451 \u0440\u0430\u0437!`
+            }
+          }));
+          if (winAmount >= bet * 2) {
+            appendSystemMessage(`\u{1F939} \u041D\u0430\u043F\u0451\u0440\u0441\u0442\u043A\u0438: \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${activeUsername} \u043E\u0431\u044B\u0433\u0440\u0430\u043B \u043D\u0430\u043F\u0451\u0440\u0441\u0442\u043E\u0447\u043D\u0438\u043A\u0430 \u0438 \u0443\u043D\u0451\u0441 +${formatCredits(winAmount)}!`, "success");
+          }
+          broadcastTavernGames();
+          break;
+        }
+        case "SVINYA_START": {
+          if (!tavernSettings.enabledGames.svinya) {
+            ws.send(JSON.stringify({ type: "NOTIFICATION", payload: { text: "\u274C \u041A\u0430\u0440\u0442\u043E\u0447\u043D\u0430\u044F \u0438\u0433\u0440\u0430 \u0421\u0432\u0438\u043D\u044C\u044F \u0432\u0440\u0435\u043C\u0435\u043D\u043D\u043E \u043E\u0442\u043A\u043B\u044E\u0447\u0435\u043D\u0430 \u043A\u0443\u0440\u0430\u0442\u043E\u0440\u043E\u043C!", type: "danger" } }));
+            return;
+          }
+          const { playerId, bet } = payload;
+          const profile = playerDb[playerId];
+          if (!profile) return;
+          if (activeSvinyaBets[playerId] !== void 0) {
+            sendError(ws, "\u041F\u0430\u0440\u0442\u0438\u044F \u0432 \xAB\u0421\u0432\u0438\u043D\u044C\u044E\xBB \u0443\u0436\u0435 \u0437\u0430\u043F\u0443\u0449\u0435\u043D\u0430.");
+            return;
+          }
+          if (profile.balance < bet) {
+            ws.send(JSON.stringify({ type: "NOTIFICATION", payload: { text: "\u274C \u041D\u0435\u0434\u043E\u0441\u0442\u0430\u0442\u043E\u0447\u043D\u043E \u0441\u0440\u0435\u0434\u0441\u0442\u0432 \u043D\u0430 \u0431\u0430\u043B\u0430\u043D\u0441\u0435 \u041A\u041F\u041A!", type: "danger" } }));
+            return;
+          }
+          profile.balance -= bet;
+          activeSvinyaBets[playerId] = bet;
+          savePlayerDb();
+          ws.send(JSON.stringify({
+            type: "SVINYA_START_RESPONSE",
+            payload: {
+              success: true,
+              balance: profile.balance
+            }
+          }));
+          broadcastTavernGames();
+          break;
+        }
+        case "SVINYA_FINISH": {
+          const { playerId, result } = payload;
+          const profile = playerDb[playerId];
+          if (!profile || !["win", "tie", "lose"].includes(result)) return;
+          const activeClient = clients.get(ws);
+          const activeUsername = activeClient ? activeClient.username : "\u0421\u0442\u0430\u043B\u043A\u0435\u0440";
+          const bet = activeSvinyaBets[playerId];
+          if (bet === void 0) {
+            sendError(ws, "\u0410\u043A\u0442\u0438\u0432\u043D\u0430\u044F \u043F\u0430\u0440\u0442\u0438\u044F \u0432 \xAB\u0421\u0432\u0438\u043D\u044C\u044E\xBB \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u0430.");
+            return;
+          }
+          let winAmount = 0;
+          if (result === "win") {
+            winAmount = bet * 2;
+          } else if (result === "tie") {
+            winAmount = bet;
+          }
+          if (winAmount > 0) {
+            profile.balance += winAmount;
+          }
+          delete activeSvinyaBets[playerId];
+          savePlayerDb();
+          ws.send(JSON.stringify({
+            type: "SVINYA_FINISH_RESPONSE",
+            payload: {
+              winAmount,
+              result,
+              balance: profile.balance,
+              message: result === "win" ? `\u{1F3C6} \u0412\u044B \u043E\u0431\u044B\u0433\u0440\u0430\u043B\u0438 \u0432 \xAB\u0421\u0432\u0438\u043D\u044C\u044E\xBB \u0438 \u0437\u0430\u0431\u0440\u0430\u043B\u0438 +${formatCredits(winAmount)}!` : result === "tie" ? `\u{1F91D} \u041D\u0438\u0447\u044C\u044F \u0432 \xAB\u0421\u0432\u0438\u043D\u044C\u044E\xBB! \u0412\u043E\u0437\u0432\u0440\u0430\u0449\u0435\u043D\u043E ${formatCredits(winAmount)}.` : `\u{1F4B8} \u0412\u044B \u0437\u0430\u043A\u043E\u043D\u0447\u0438\u043B\u0438 \u043F\u0430\u0440\u0442\u0438\u044E \u0432 \xAB\u0421\u0432\u0438\u043D\u044C\u044E\xBB \u043F\u0440\u043E\u0438\u0433\u0440\u044B\u0448\u0435\u043C. \u0421\u0442\u0430\u0432\u043A\u0430 \u0443\u0448\u043B\u0430 \u0431\u0430\u0440\u043C\u0435\u043D\u0443.`
+            }
+          }));
+          if (result === "win") {
+            appendSystemMessage(`\u{1F437} \u0421\u0432\u0438\u043D\u044C\u044F: \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${activeUsername} \u0440\u0430\u0437\u043B\u043E\u0436\u0438\u043B \u043A\u0430\u0440\u0442\u044B \u043A\u0440\u0443\u0433\u043E\u043C, \u043E\u0431\u044B\u0433\u0440\u0430\u043B \u0425\u0430\u0440\u043E\u043D\u0430 \u0438 \u0437\u0430\u0440\u0430\u0431\u043E\u0442\u0430\u043B +${formatCredits(winAmount)}!`, "success");
+          } else if (result === "lose") {
+            appendSystemMessage(`\u{1F437} \u0421\u0432\u0438\u043D\u044C\u044F: \u0421\u0442\u0430\u043B\u043A\u0435\u0440 ${activeUsername} \u043E\u0441\u0442\u0430\u043B\u0441\u044F \xAB\u0421\u0432\u0438\u043D\u044C\u0451\u0439\xBB \u0432 \u043A\u0430\u0440\u0442\u043E\u0447\u043D\u043E\u0439 \u043F\u0430\u0440\u0442\u0438\u0438 \u0438 \u043F\u043E\u0442\u0435\u0440\u044F\u043B \u0441\u0432\u043E\u0438 ${formatCredits(bet)}.`, "info");
           }
           broadcastTavernGames();
           break;

@@ -12,9 +12,11 @@
       "name": "theDAREK497"
     }
   ],
-  "esmodules": ["module.js"],
+  "esmodules": [
+    "module.js"
+  ],
   "styles": [],
-  "url": "https://github.com/theDAREK497/ANOMALY-ZONE-foundry",
-  "manifest": "https://raw.githubusercontent.com/theDAREK497/ANOMALY-ZONE-foundry/main/module.json",
-  "download": "https://github.com/theDAREK497/ANOMALY-ZONE-foundry/archive/refs/heads/main.zip"
+  "url": "https://github.com/theDAREK497/anomaly-zone-vtt",
+  "manifest": "https://raw.githubusercontent.com/theDAREK497/anomaly-zone-vtt/main/module.json",
+  "download": "https://github.com/theDAREK497/anomaly-zone-vtt/archive/refs/heads/main.zip"
 }

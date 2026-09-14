@@ -1,14 +1,16 @@
 {
-  "name": "react-example",
+  "name": "anomaly-zone-vtt",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "check:anomalies": "tsx scripts/validate-anomalies.ts",
+    "test:anomaly-server": "tsx scripts/test-anomaly-server.ts"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",

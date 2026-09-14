@@ -1,7 +1,52 @@
 import { createRandomGenerator, randomInt, randomChoice } from './random';
+import { ANOMALY_IDS, AnomalyPhaseId, EncounterResult, ResolutionMode } from '../data/anomalies';
+import type { Puzzle } from './anomaly-gameplay';
 
 export type CellType = 'empty' | 'entrance' | 'exit' | 'stash' | 'artifact' | 'anomaly';
-export type AnomalyType = 'fire' | 'trampoline' | 'sphere' | 'electric' | 'vortex' | 'time_loop' | null;
+export type AnomalyType = string | null;
+
+export interface AnomalyEncounterState {
+  puzzle?: Puzzle;
+  timeRemaining?: number;
+  difficulty?: number;
+  anomalyId: string;
+  seed: string;
+  mode: ResolutionMode;
+  phase: AnomalyPhaseId;
+  anomalyStability: number;
+  exposure: number;
+  contamination: number;
+  trainIntegrityRisk: number;
+  discoveredClues: string[];
+  mistakes: number;
+  elapsedRounds: number;
+  progress: number;
+  sequence: string[];
+  sequenceIndex: number;
+  preparedActions: string[];
+  usedSkills: string[];
+  rollResults: Array<{ skillTag: string; foundryItemUuid?: string; target: number; roll: number; margin: number; success: boolean; critical: boolean }>;
+  decisions: string[];
+  participants: string[];
+  result?: EncounterResult;
+  paused?: boolean;
+}
+
+export interface AnomalyJournalEntry {
+  anomalyId: string;
+  seed: string;
+  mode: ResolutionMode | 'field';
+  participants: string[];
+  usedSkills: string[];
+  rollResults: AnomalyEncounterState['rollResults'];
+  decisions: string[];
+  mistakes: number;
+  result: EncounterResult;
+  consequences: string[];
+  rewards: string[];
+  trainChanges: string[];
+  completedAt: string;
+}
 
 export interface Cell {
   x: number;
@@ -14,11 +59,16 @@ export interface Cell {
   isScannedForRadiation: boolean;
   isScannedByBolt: boolean;
   hasExpanded?: boolean;
+  anomalySeed?: string;
+  anomalyResolved?: boolean;
+  fieldWarned?: boolean;
+  fieldVisits?: number;
   isApproximateLocation?: boolean;
   isOutOfBounds?: boolean;
 }
 
 export interface GameMap {
+  difficulty?: number;
   width: number;
   height: number;
   grid: Cell[][];
@@ -35,6 +85,14 @@ export interface GameMap {
   playerPos?: {x: number, y: number};
   activeDirectionHighlight?: string | null;
   inventory?: string[];
+  seed: string;
+  anomalyResolutionMode: ResolutionMode;
+  anomalyTimerEnabled: boolean;
+  anomalySpeed: number;
+  anomalyCriticalRollAutoSuccess: boolean;
+  silentZoneInterfaceComms: boolean;
+  activeAnomalyEncounter?: AnomalyEncounterState | null;
+  anomalyJournal?: AnomalyJournalEntry[];
 }
 
 export interface GenerationParams {
@@ -54,6 +112,11 @@ export interface GenerationParams {
   detectorCharges: number;
   detectorLevel: number;
   boltCharges: number;
+  anomalyResolutionMode: ResolutionMode;
+  anomalyTimerEnabled: boolean;
+  anomalySpeed: number;
+  anomalyCriticalRollAutoSuccess: boolean;
+  silentZoneInterfaceComms: boolean;
 }
 
 export function generateMap(params: GenerationParams): GameMap {
@@ -103,8 +166,9 @@ export function generateMap(params: GenerationParams): GameMap {
   }
 
   if (exits.length === 0) {
-     grid[0][randomInt(rng, 0, params.width - 1)].type = 'exit';
-     exits.push({x: randomInt(rng, 0, params.width - 1), y: 0});
+    const fallbackExitX = randomInt(rng, 0, params.width - 1);
+    grid[0][fallbackExitX].type = 'exit';
+    exits.push({x: fallbackExitX, y: 0});
   }
 
   // 3. Safe Path
@@ -150,9 +214,9 @@ export function generateMap(params: GenerationParams): GameMap {
   placeRandomly('artifact', params.artifacts);
 
   // 5. Anomalies
-  const anomalyTypes: AnomalyType[] = params.allowedAnomalies && params.allowedAnomalies.length > 0 
-    ? params.allowedAnomalies 
-    : ['fire', 'trampoline', 'sphere', 'electric'];
+  const anomalyTypes: AnomalyType[] = params.allowedAnomalies && params.allowedAnomalies.length > 0
+    ? params.allowedAnomalies
+    : ANOMALY_IDS;
   const totalCells = params.width * params.height;
   const anomalyCount = Math.floor(totalCells * (params.difficulty * 0.03));
 
@@ -161,10 +225,11 @@ export function generateMap(params: GenerationParams): GameMap {
   while (anomaliesPlaced < anomalyCount && attempts < 2000) {
     const rx = randomInt(rng, 0, params.width - 1);
     const ry = randomInt(rng, 0, params.height - 1);
-    
+
     if (!safePath.has(`${rx},${ry}`) && grid[ry][rx].type === 'empty') {
       grid[ry][rx].type = 'anomaly';
       grid[ry][rx].anomalyType = randomChoice(rng, anomalyTypes);
+      grid[ry][rx].anomalySeed = `${params.seed}:${params.salt}:${rx}:${ry}:${grid[ry][rx].anomalyType}`;
       anomaliesPlaced++;
     }
     attempts++;
@@ -177,7 +242,7 @@ export function generateMap(params: GenerationParams): GameMap {
     const rx = randomInt(rng, 0, params.width - 1);
     const ry = randomInt(rng, 0, params.height - 1);
     const strength = randomInt(rng, 1, 3);
-    
+
     for (let dy = -strength; dy <= strength; dy++) {
       for (let dx = -strength; dx <= strength; dx++) {
         const nx = rx + dx;
@@ -212,7 +277,16 @@ export function generateMap(params: GenerationParams): GameMap {
     detectorCharges: params.detectorCharges,
     detectorLevel: params.detectorLevel,
     timerSeconds: 60,
+    difficulty: params.difficulty,
     boltCharges: params.boltCharges,
     inventory: []
+    ,seed: params.seed + params.salt
+    ,anomalyResolutionMode: params.anomalyResolutionMode
+    ,anomalyTimerEnabled: params.anomalyTimerEnabled
+    ,anomalySpeed: params.anomalySpeed
+    ,anomalyCriticalRollAutoSuccess: params.anomalyCriticalRollAutoSuccess
+    ,silentZoneInterfaceComms: params.silentZoneInterfaceComms
+    ,activeAnomalyEncounter: null
+    ,anomalyJournal: []
   };
 }

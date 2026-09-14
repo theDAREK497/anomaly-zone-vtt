@@ -4,6 +4,9 @@ import http from "http";
 import fs from "fs";
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer as createViteServer } from "vite";
+import { ANOMALY_BY_ID, AnomalyAction, EncounterResult } from "./src/data/anomalies";
+import { createRandomGenerator } from './src/utils/random';
+import { encounterKind, createPuzzle, applyPuzzleInput, encounterSeconds, tickAnomalyClock, fieldOutcome, rollThreeDice, RESULT_LABELS } from './src/utils/anomaly-gameplay';
 
 interface Player {
   id: string;
@@ -195,7 +198,7 @@ function resolveCellEnter(nx: number, ny: number) {
 
     const radDmg = cell.radiationLevel * 6;
     map.health = Math.max(0, map.health - radDmg);
-    appendSystemMessage(`💔 Здоровье отряда снизилось на -${radDmg} HP из-за фонирующих очагов радиации.`, "danger");
+    appendSystemMessage(`💔 Здоровье отряда снизилось на ${radDmg} ОЗ из-за фонирующих очагов радиации.`, "danger");
   }
 
   // 2. Safe / exit check
@@ -229,84 +232,188 @@ function resolveCellEnter(nx: number, ny: number) {
 
   // 5. Anomaly triggering
   if (cell.type === "anomaly") {
-    const name = cell.anomalyType;
-    if (name === "fire") {
-      map.health = Math.max(0, map.health - 25);
-      appendSystemMessage("🔥 ЖАРКА! Огненный столб сжигает снаряжение: -25HP у всей группы!", "danger");
-    } else if (name === "trampoline") {
-      map.health = Math.max(0, map.health - 20);
-      appendSystemMessage("💨 ТРАМПЛИН! Столкновение сжатого воздуха швыряет группу: -20HP! Случайная телепортация...", "danger");
-      const tx = Math.floor(Math.random() * map.width);
-      const ty = Math.floor(Math.random() * map.height);
-      map.playerPos = { x: tx, y: ty };
-      resolveCellEnter(tx, ty);
-    } else if (name === "sphere") {
-      map.health = Math.max(0, map.health - 30);
-      appendSystemMessage("🫧 ГРАВИ-СФЕРА! Сдавливающий купол наносит тяжелые увечья: -30HP!", "danger");
-      if (!cell.hasExpanded) {
-        cell.hasExpanded = true;
-        const adj = [
-          {dx:1, dy:0}, {dx:-1, dy:0}, {dx:0, dy:1}, {dx:0, dy:-1},
-          {dx:1, dy:1}, {dx:-1, dy:-1}, {dx:1, dy:-1}, {dx:-1, dy:1}
-        ];
-        adj.forEach(d => {
-          const ax = nx + d.dx;
-          const ay = ny + d.dy;
-          if (ax >= 0 && ax < map.width && ay >= 0 && ay < map.height) {
-            if (map.grid[ay][ax].type === "empty") {
-              map.grid[ay][ax] = {
-                ...map.grid[ay][ax],
-                type: "anomaly",
-                anomalyType: "sphere",
-                isRevealed: true,
-                hasExpanded: true
-              };
-            }
-          }
-        });
-        appendSystemMessage("🫧 Аномалия Сфера детонировала и расширила смертоносное поле на соседние клетки!", "danger");
-      }
-    } else if (name === "electric") {
-      map.health = Math.max(0, map.health - 25);
-      appendSystemMessage("⚡ ЭЛЕКТРА! Электрический шок парализует отряд: -25HP!", "danger");
-    } else if (name === "vortex") {
-      map.health = Math.max(0, map.health - 15);
-      appendSystemMessage("🌀 ВОРОНКА! Группу затянуло в малую сингулярность: -15HP! Вы сдвинуты в сторону.", "danger");
-      const directions = [{dx:1, dy:0}, {dx:-1, dy:0}, {dx:0, dy:1}, {dx:0, dy:-1}];
-      const valid = directions.filter(d => 
-        nx + d.dx >= 0 && nx + d.dx < map.width && 
-        ny + d.dy >= 0 && ny + d.dy < map.height
-      );
-      if (valid.length > 0) {
-        const d = valid[Math.floor(Math.random() * valid.length)];
-        map.playerPos = { x: nx + d.dx, y: ny + d.dy };
-        resolveCellEnter(nx + d.dx, ny + d.dy);
-      }
-    } else if (name === "time_loop") {
-      map.health = Math.max(0, map.health - 10);
-      appendSystemMessage("⏳ ХРОНОСДВИГ! Вспышка временной петли перебрасывает группу на точку входа: -10HP!", "danger");
-      map.playerPos = { x: map.entrance.x, y: map.entrance.y };
-      resolveCellEnter(map.entrance.x, map.entrance.y);
-    }
+    if (!cell.anomalyResolved) startAnomalyEncounter(cell);
   }
 }
 
 function getAnomalyRussianName(type: string | null): string {
-  if (!type) return "Неизвестная аномалия";
-  const translations: Record<string, string> = {
-    "fire": "Жарка",
-    "trampoline": "Трамплин",
-    "sphere": "Грави-сфера",
-    "electric": "Электра",
-    "vortex": "Воронка",
-    "time_loop": "Хроносдвиг"
+  return type ? ANOMALY_BY_ID[type]?.name || type : "Неизвестная аномалия";
+}
+
+function seededNumber(seed: string, index = 0): number {
+  return createRandomGenerator(`${seed}:${index}`)();
+}
+
+function encounterSequence(anomalyId: string, seed: string): string[] {
+  const pools: Record<string, string[]> = {
+    "crystal-resonance": ["tone-low", "tone-mid", "tone-high"],
+    "echo-loop": ["echo-a", "echo-b", "echo-c"]
   };
-  return translations[type] || type;
+  const pool = pools[anomalyId];
+  if (!pool) return [];
+  const original = Array.from({ length: 3 }, (_, index) => pool[Math.floor(seededNumber(seed, index) * pool.length)]);
+  return anomalyId === "echo-loop" ? original.reverse() : original;
+}
+
+function startAnomalyEncounter(cell: any) {
+  const definition = ANOMALY_BY_ID[cell.anomalyType];
+  if (!definition || map.activeAnomalyEncounter) return;
+  const seed = cell.anomalySeed || `${map.seed || "EON"}:${cell.x}:${cell.y}:${cell.anomalyType}`;
+  const kind = encounterKind(definition.id);
+  if (kind === 'field') {
+    if (!cell.fieldWarned) {
+      cell.fieldWarned = true;
+      appendSystemMessage(`⚠️ ${definition.name}: ${definition.detection.passiveSignal} Первый контакт безопасен. Повторный вход вызовет эффект аномалии: обойдите очаг или исследуйте его болтом.`, 'warning');
+      return;
+    }
+    const visit = cell.fieldVisits || 0;
+    const safe: number[] = [], expandable: number[] = [];
+    for (const row of map.grid) for (const candidate of row) {
+      if (candidate.type !== 'empty' || candidate.radiationLevel > 0) continue;
+      const index = candidate.y * map.width + candidate.x;
+      safe.push(index);
+      if (Math.abs(candidate.x - cell.x) + Math.abs(candidate.y - cell.y) === 1) expandable.push(index);
+    }
+    const effect = fieldOutcome(definition.id, seed, visit, safe, expandable);
+    cell.fieldVisits = visit + 1;
+    const damage = Math.min(effect.damage, Math.max(0, map.health - 1));
+    map.health -= damage;
+    const consequences: string[] = [];
+    if (damage) consequences.push(`Здоровье −${damage}`);
+    if (effect.expansion !== null) {
+      const x = effect.expansion % map.width, y = Math.floor(effect.expansion / map.width);
+      Object.assign(map.grid[y][x], { type: 'anomaly', anomalyType: definition.id, anomalySeed: `${seed}:growth:${visit}`, isRevealed: true, fieldWarned: false });
+      consequences.push(`Очаг расширился в клетку ${x}, ${y}; новый край даёт предупреждение перед воздействием`);
+    }
+    if (effect.destination !== null) {
+      const x = effect.destination % map.width, y = Math.floor(effect.destination / map.width);
+      map.playerPos = { x, y }; map.grid[y][x].isRevealed = true;
+      consequences.push(`Отряд перемещён в безопасную клетку ${x}, ${y}`);
+    }
+    map.anomalyJournal ||= [];
+    map.anomalyJournal.push({ anomalyId: definition.id, seed: `${seed}:field:${visit}`, mode: 'field', participants: [...new Set([...clients.values()].map(p => p.username))], usedSkills: [], rollResults: [], decisions: ['Повторный вход после предупреждения'], mistakes: 0, result: 'successWithCost', consequences, rewards: [], trainChanges: [], completedAt: new Date().toISOString() });
+    appendSystemMessage(`◆ ${definition.name}: ${consequences.join('; ') || 'Очаг затих, доступных клеток для воздействия нет'}.`, 'warning');
+    return;
+  }
+  const difficulty = map.difficulty ?? definition.dangerTier;
+  const mode = kind === 'rolls' ? 'gurps-roll' : map.anomalyResolutionMode || 'hybrid';
+  map.activeAnomalyEncounter = {
+    anomalyId: definition.id, seed, mode, phase: "warning", difficulty,
+    timeRemaining: encounterSeconds(difficulty),
+    puzzle: mode !== 'gurps-roll' ? createPuzzle(definition.id, seed, difficulty) : undefined,
+    anomalyStability: 70, exposure: 0, contamination: 0, trainIntegrityRisk: 0,
+    discoveredClues: [definition.detection.passiveSignal], mistakes: 0, elapsedRounds: 0, progress: 0,
+    sequence: encounterSequence(definition.id, seed), sequenceIndex: 0, preparedActions: [], usedSkills: [], rollResults: [],
+    decisions: [], participants: [], paused: false
+  };
+  appendSystemMessage(`⚠️ Обнаружена аномалия «${definition.name}». Наблюдаемый сигнал: ${definition.detection.passiveSignal}`, "warning");
+}
+
+function updateEncounterPhase(encounter: any, definition: any) {
+  const matches = (phaseId: string) => {
+    const transition = definition.phases.find((phase: any) => phase.id === phaseId)?.transition || {};
+    if (transition.onResult) return encounter.result && transition.onResult.includes(encounter.result);
+    const checks: boolean[] = [];
+    if (transition.minRounds !== undefined) checks.push(encounter.elapsedRounds >= transition.minRounds);
+    if (transition.minMistakes !== undefined) checks.push(encounter.mistakes >= transition.minMistakes);
+    if (transition.maxStability !== undefined) checks.push(encounter.anomalyStability <= transition.maxStability);
+    return checks.length > 0 && checks.some(Boolean);
+  };
+  const phaseOrder = ["dormant", "warning", "active", "collapse", "aftermath"];
+  let nextPhase = "dormant";
+  if (matches("aftermath")) nextPhase = "aftermath";
+  else if (matches("collapse")) nextPhase = "collapse";
+  else if (matches("active")) nextPhase = "active";
+  else if (matches("warning")) nextPhase = "warning";
+  if (phaseOrder.indexOf(nextPhase) >= phaseOrder.indexOf(encounter.phase)) encounter.phase = nextPhase;
+}
+
+function finishEncounter(result: EncounterResult) {
+  const encounter = map.activeAnomalyEncounter;
+  const definition = encounter && ANOMALY_BY_ID[encounter.anomalyId];
+  if (!encounter || !definition || encounter.result) return;
+  encounter.result = result;
+  encounter.phase = "aftermath";
+  const consequencePool = result === "completeSuccess" || result === "retreat" ? [] : definition.characterConsequences[result] || [];
+  const consequence = consequencePool.length ? consequencePool[Math.floor(seededNumber(encounter.seed, 90 + encounter.mistakes) * consequencePool.length)] : null;
+  const rewards = result === "completeSuccess" || result === "successWithCost"
+    ? [definition.rewards[Math.floor(seededNumber(encounter.seed, 120) * definition.rewards.length)]] : [];
+  const trainChanges = encounter.trainIntegrityRisk >= 60 ? [definition.trainConsequences.possiblePermanentFaults[0]]
+    : encounter.trainIntegrityRisk >= 25 ? [definition.trainConsequences.possibleTemporaryFaults[0]] : [];
+  const hpLoss = result === "criticalFailure" ? 20 : result === "failure" ? 12 : result === "partialFailure" ? 6 : result === "successWithCost" ? 3 : 0;
+  map.health = Math.max(0, map.health - hpLoss);
+  if (rewards.length) {
+    if (!map.inventory) map.inventory = [];
+    map.inventory.push(...rewards);
+  }
+  const pos = map.playerPos;
+  const cell = pos && map.grid[pos.y]?.[pos.x];
+  if (cell?.anomalyType === encounter.anomalyId) cell.anomalyResolved = result !== "retreat";
+  if (result === "retreat") map.playerPos = { ...map.entrance };
+  if (!map.anomalyJournal) map.anomalyJournal = [];
+  map.anomalyJournal.push({
+    anomalyId: encounter.anomalyId, seed: encounter.seed, mode: encounter.mode, participants: encounter.participants,
+    usedSkills: encounter.usedSkills, rollResults: encounter.rollResults, decisions: encounter.decisions, mistakes: encounter.mistakes,
+    result, consequences: consequence ? [consequence] : [], rewards, trainChanges, completedAt: new Date().toISOString()
+  });
+  appendSystemMessage(`◆ «${definition.name}»: ${RESULT_LABELS[result]}. ${consequence || "Экипаж сохранил контроль над ситуацией."}`, result === "completeSuccess" ? "success" : "warning");
+}
+
+function applyEncounterAction(action: AnomalyAction, username: string) {
+  const encounter = map?.activeAnomalyEncounter;
+  if (!encounter || encounter.result || encounter.paused || action.kind !== 'retreat' || encounter.phase === 'collapse') return;
+  if (!encounter.participants.includes(username)) encounter.participants.push(username);
+  encounter.decisions.push(`${username}: отступление`);
+  finishEncounter('retreat');
+}
+
+function resolveGurpsRoll(skillTag: string, target: number, username: string, foundryItemUuid?: string) {
+  const encounter = map.activeAnomalyEncounter;
+  const definition = encounter && ANOMALY_BY_ID[encounter.anomalyId];
+  if (!encounter || !definition || encounter.result || encounter.paused) return;
+  if (!definition.gurpsResolution.allowedSkillTags.includes(skillTag) && skillTag !== "manual") return;
+  const safeTarget = Math.max(3, Math.min(18, Math.floor(target)));
+  const index = encounter.rollResults.length;
+  const dice = rollThreeDice(encounter.seed, index);
+  const roll = dice.reduce((sum, die) => sum + die, 0);
+  const effectiveTarget = safeTarget + definition.gurpsResolution.defaultPenalty;
+  const criticalSuccess = roll <= 4 || (roll === 5 && effectiveTarget >= 15) || (roll === 6 && effectiveTarget >= 16);
+  const criticalFailure = roll === 18 || (roll === 17 && effectiveTarget <= 15) || roll - effectiveTarget >= 10;
+  const success = criticalSuccess || (roll < 17 && roll <= effectiveTarget);
+  const critical = criticalSuccess || criticalFailure;
+  const resolvedSkill = skillTag === "manual" && foundryItemUuid ? `manual:${foundryItemUuid}` : skillTag;
+  encounter.rollResults.push({ skillTag, foundryItemUuid, target: effectiveTarget, roll, margin: effectiveTarget - roll, success, critical });
+  encounter.usedSkills.push(resolvedSkill);
+  if (!encounter.participants.includes(username)) encounter.participants.push(username);
+  encounter.elapsedRounds++;
+  if (success) {
+    if (encounter.mode === "gurps-roll") encounter.progress++;
+    else {
+      encounter.preparedActions.push('hybrid-forgiveness');
+      encounter.timeRemaining += 10;
+      encounter.discoveredClues.push('Успешная проверка: +10 секунд и защита от одной ошибки.');
+      const clue = definition.detection.clues[Math.min(encounter.discoveredClues.length, definition.detection.clues.length - 1)];
+      if (clue && !encounter.discoveredClues.includes(clue)) encounter.discoveredClues.push(clue);
+    }
+    encounter.anomalyStability = Math.min(100, encounter.anomalyStability + 10);
+    if (critical && map.anomalyCriticalRollAutoSuccess) return finishEncounter("completeSuccess");
+  } else {
+    encounter.mistakes++;
+    encounter.exposure = Math.min(100, encounter.exposure + (critical ? 20 : 10));
+    encounter.anomalyStability = Math.max(0, encounter.anomalyStability - (critical ? 25 : 12));
+  }
+  updateEncounterPhase(encounter, definition);
+  if (encounter.mode === "gurps-roll" && encounter.progress >= definition.gurpsResolution.requiredSuccesses) finishEncounter(encounter.mistakes ? "successWithCost" : "completeSuccess");
+  else if (encounter.phase === "collapse" && encounter.mistakes >= definition.minigame.maxMistakes + 1) finishEncounter("criticalFailure");
 }
 
 // Centralized Action Execution (re-used for both voting consensus and GM immediate clicks)
 function executeGameAction(action: string) {
   if (!map) return;
+  if (map.activeAnomalyEncounter) {
+    appendSystemMessage("⚠️ Сначала разрешите текущую аномалию или отступите.", "warning");
+    return;
+  }
   if (!map.playerPos) {
     map.playerPos = { x: map.entrance.x, y: map.entrance.y };
   }
@@ -421,7 +528,7 @@ function executeGameAction(action: string) {
   }
 
   // Reset timer to 60s
-  map.timerSeconds = 60;
+  if (!map.activeAnomalyEncounter) map.timerSeconds = 60;
 
   // Audit survival bounds
   checkGameLossSurvival();
@@ -432,7 +539,16 @@ let serverClockInterval: any = null;
 function initTurnTimerClock() {
   if (serverClockInterval) clearInterval(serverClockInterval);
   serverClockInterval = setInterval(() => {
-    if (gameState === "playing" && map) {
+    if (gameState === "playing" && map?.activeAnomalyEncounter) {
+      const encounter = map.activeAnomalyEncounter;
+      const tick = tickAnomalyClock(encounter, map.anomalyTimerEnabled !== false);
+      if (tick === 'paused') return;
+      if (tick === 'expired') {
+        encounter.decisions.push('Истекло время решения');
+        finishEncounter(encounter.progress > 0 ? 'partialFailure' : 'failure');
+      }
+      broadcast('SYNC_APP_STATE', { map, gameState, messages });
+    } else if (gameState === "playing" && map && !map.activeAnomalyEncounter) {
       if (map.timerSeconds > 0) {
         map.timerSeconds--;
         broadcast("TIMER_TICK", { timerSeconds: map.timerSeconds });
@@ -614,6 +730,88 @@ function broadcastTavernGames() {
 // ПАЗААК ЛОББИ И РУЛЕТКА
 let pazaakLobbies: Record<string, any> = {};
 let activeSvinyaBets: Record<string, number> = {};
+let activeDiceGames: Record<string, {
+  bet: number;
+  botDice: number[];
+  playerDice: number[];
+  rerollStep: 1 | 2;
+}> = {};
+
+const SELF_ID_FIELDS: Record<string, "playerId" | "creatorId" | "opponentId"> = {
+  PAZAAK_BUY_BOOSTER: "playerId",
+  PAZAAK_SAVE_DECK: "playerId",
+  PAZAAK_CREATE_LOBBY: "creatorId",
+  PAZAAK_JOIN_LOBBY: "opponentId",
+  PAZAAK_PLAY_CARD: "playerId",
+  PAZAAK_END_TURN: "playerId",
+  PAZAAK_STAND: "playerId",
+  PAZAAK_CONCEDE: "playerId",
+  DICE_PLAY_BOT: "playerId",
+  DICE_REROLL: "playerId",
+  RACE_PLACE_BET: "playerId",
+  BAR_SELL_ITEM: "playerId",
+  BUY_SHOP_ITEM: "playerId",
+  SLOTS_SPIN: "playerId",
+  ROULETTE_SPIN: "playerId",
+  SHOOTING_RANGE_FINISH: "playerId",
+  THIMBLERIG_PLAY: "playerId",
+  SVINYA_START: "playerId",
+  SVINYA_FINISH: "playerId"
+};
+
+const BET_FIELDS: Record<string, "bet" | "betAmount"> = {
+  PAZAAK_CREATE_LOBBY: "bet",
+  DICE_PLAY_BOT: "bet",
+  RACE_PLACE_BET: "betAmount",
+  SLOTS_SPIN: "bet",
+  ROULETTE_SPIN: "betAmount",
+  SHOOTING_RANGE_FINISH: "bet",
+  THIMBLERIG_PLAY: "bet",
+  SVINYA_START: "bet"
+};
+
+const BAR_ACTIVITY_COMMANDS = new Set([
+  "PAZAAK_BUY_BOOSTER",
+  "PAZAAK_SAVE_DECK",
+  "PAZAAK_CREATE_LOBBY",
+  "PAZAAK_JOIN_LOBBY",
+  "PAZAAK_PLAY_CARD",
+  "PAZAAK_END_TURN",
+  "PAZAAK_STAND",
+  "PAZAAK_CONCEDE",
+  "DICE_PLAY_BOT",
+  "DICE_REROLL",
+  "RACE_PLACE_BET",
+  "BAR_SELL_ITEM",
+  "BUY_SHOP_ITEM",
+  "SLOTS_SPIN",
+  "ROULETTE_SPIN",
+  "SHOOTING_RANGE_FINISH",
+  "THIMBLERIG_PLAY",
+  "SVINYA_START",
+  "SVINYA_FINISH"
+]);
+
+function sendError(ws: WebSocket, text: string) {
+  ws.send(JSON.stringify({ type: "NOTIFICATION", payload: { text, type: "danger" } }));
+}
+
+function isPositiveCreditAmount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= 1_000_000;
+}
+
+function isValidPlayerIdentity(id: unknown, username: unknown): id is string {
+  return typeof id === "string"
+    && typeof username === "string"
+    && id === username
+    && id.trim() === id
+    && id.length >= 1
+    && id.length <= 40
+    && id !== "__proto__"
+    && id !== "prototype"
+    && id !== "constructor"
+    && !/[\u0000-\u001f\u007f]/.test(id);
+}
 
 // АНОМАЛЬНЫЕ СКАЧКИ ОДДС
 let activeRace: {
@@ -636,6 +834,7 @@ let activeRace: {
   log: [],
   tickCount: 0
 };
+let activeRaceInterval: ReturnType<typeof setInterval> | null = null;
 
 function rollPazaakStep(lobby: any) {
   if (lobby.status !== "playing") return;
@@ -806,12 +1005,7 @@ function checkPazaakRoundEnd(lobby: any) {
       lobby.log.push(`🏆 ${lobby.creatorName} забирает все! Выигрыш: +${formatCredits(lobby.bet)}`);
       
       if (playerDb[lobby.creatorId]) {
-        playerDb[lobby.creatorId].balance += lobby.bet;
-      }
-      if (lobby.opponentId !== "BOT_BAR" && playerDb[lobby.opponentId]) {
-        playerDb[lobby.opponentId].balance -= lobby.bet;
-      } else if (lobby.opponentId === "BOT_BAR") {
-        playerDb[lobby.creatorId].balance += lobby.bet;
+        playerDb[lobby.creatorId].balance += lobby.bet * 2;
       }
       savePlayerDb();
     } else if (lobby.roundsWonB >= 3) {
@@ -869,11 +1063,47 @@ wss.on("connection", (ws) => {
 
   ws.on("message", (messageStr) => {
     try {
-      const { type, payload } = JSON.parse(messageStr.toString());
+      const parsedMessage = JSON.parse(messageStr.toString());
+      const type = parsedMessage?.type;
+      const payload = parsedMessage?.payload ?? {};
+
+      if (typeof type !== "string" || typeof payload !== "object" || Array.isArray(payload)) {
+        sendError(ws, "Некорректный формат команды.");
+        return;
+      }
+
+      if (gameState === "playing" && BAR_ACTIVITY_COMMANDS.has(type)) {
+        sendError(ws, "Бар недоступен во время активной экспедиции.");
+        return;
+      }
+
+      const selfIdField = SELF_ID_FIELDS[type];
+      if (selfIdField) {
+        const player = clients.get(ws);
+        if (!player || payload[selfIdField] !== player.id) {
+          sendError(ws, "Операция отклонена: профиль отправителя не совпадает с профилем операции.");
+          return;
+        }
+        if ("username" in payload) payload.username = player.username;
+        if ("creatorName" in payload) payload.creatorName = player.username;
+        if ("opponentName" in payload) payload.opponentName = player.username;
+      }
+
+      const betField = BET_FIELDS[type];
+      if (betField && !isPositiveCreditAmount(payload[betField])) {
+        sendError(ws, "Ставка должна быть целым положительным числом не более 1 000 000.");
+        return;
+      }
 
       switch (type) {
         case "JOIN": {
           const { id, username, role } = payload;
+
+          if (!isValidPlayerIdentity(id, username) || (role !== "player" && role !== "gm")) {
+            sendError(ws, "Некорректное имя профиля или роль.");
+            ws.close();
+            return;
+          }
           
           if (role === "gm") {
             const activeGMId = getActiveGMId();
@@ -919,7 +1149,10 @@ wss.on("connection", (ws) => {
 
         case "SYNC_APP_STATE": {
           const clientData = clients.get(ws);
-          if (!clientData) return;
+          if (!clientData || clientData.role !== "gm") {
+            sendError(ws, "Только куратор может изменять состояние экспедиции.");
+            return;
+          }
 
           if (payload.gameState !== undefined) gameState = payload.gameState;
           if (payload.map !== undefined) {
@@ -944,6 +1177,12 @@ wss.on("connection", (ws) => {
 
         case "FORCE_CLAIM_GM": {
           const { id, username } = payload;
+          if (!isValidPlayerIdentity(id, username)) {
+            sendError(ws, "Некорректное имя профиля.");
+            ws.close();
+            return;
+          }
+          initPlayerProfile(id, username);
           for (const [socket, player] of clients.entries()) {
             if (player.role === "gm" && player.id !== id) {
               player.role = "player";
@@ -978,9 +1217,14 @@ wss.on("connection", (ws) => {
 
         case "SUBMIT_VOTE": {
           const player = clients.get(ws);
-          if (!player) return;
+          if (!player || player.role !== "player") return;
 
           const { action } = payload;
+          const allowedActions = new Set(["UP", "DOWN", "LEFT", "RIGHT", "BOLT_UP", "BOLT_DOWN", "BOLT_LEFT", "BOLT_RIGHT", "GEIGER", "SCAN"]);
+          if (!allowedActions.has(action)) {
+            sendError(ws, "Неизвестное действие голосования.");
+            return;
+          }
           // Track choice
           activeVotes[player.id] = { username: player.username, action };
 
@@ -1030,6 +1274,8 @@ wss.on("connection", (ws) => {
         }
 
         case "RESET_VOTES": {
+          const player = clients.get(ws);
+          if (!player || player.role !== "gm") return;
           activeVotes = {};
           broadcast("VOTES_UPDATE", { activeVotes, activePlayersCount: getActivePlayersCount() });
           break;
@@ -1043,6 +1289,101 @@ wss.on("connection", (ws) => {
           executeGameAction(action);
 
           // Force broadcast updated state
+          broadcast("SYNC_APP_STATE", { map, gameState, messages });
+          break;
+        }
+
+        case 'ANOMALY_ACK': {
+          const encounter = map?.activeAnomalyEncounter;
+          if (!clients.has(ws) || !encounter?.result || payload.seed !== encounter.seed) return;
+          map.activeAnomalyEncounter = null;
+          checkGameLossSurvival();
+          broadcast('SYNC_APP_STATE', { map, gameState, messages });
+          break;
+        }
+        case 'ANOMALY_PUZZLE': {
+          const player = clients.get(ws), encounter = map?.activeAnomalyEncounter;
+          if (!player || !encounter?.puzzle || encounter.result || encounter.paused || payload.seed !== encounter.seed) return;
+          const status = applyPuzzleInput(encounter.puzzle, payload.input);
+          if (status === 'ignored') return;
+          if (!encounter.participants.includes(player.username)) encounter.participants.push(player.username);
+          encounter.elapsedRounds++;
+          encounter.decisions.push(`${player.username}: ${JSON.stringify(payload.input)} — ${status === 'mistake' ? 'ошибка' : 'верно'}`);
+          if (status === 'mistake') {
+            const protection = encounter.preparedActions.indexOf('hybrid-forgiveness');
+            if (protection >= 0) encounter.preparedActions.splice(protection, 1);
+            else { encounter.mistakes++; encounter.exposure = Math.min(100, encounter.exposure + 15); encounter.anomalyStability = Math.max(0, encounter.anomalyStability - 20); }
+          } else {
+            const puzzle = encounter.puzzle;
+            encounter.progress = puzzle.kind === 'wires' ? puzzle.connected.length : puzzle.kind === 'sequence' ? puzzle.cursor : puzzle.visited.length - 1;
+          }
+          updateEncounterPhase(encounter, ANOMALY_BY_ID[encounter.anomalyId]);
+          if (status === 'complete') finishEncounter(encounter.mistakes ? 'successWithCost' : 'completeSuccess');
+          else if (encounter.mistakes >= encounter.puzzle.limit) finishEncounter(encounter.progress ? 'partialFailure' : 'failure');
+          broadcast('SYNC_APP_STATE', { map, gameState, messages });
+          break;
+        }
+        case "ANOMALY_ACTION": {
+          const player = clients.get(ws);
+          const encounter = map?.activeAnomalyEncounter;
+          const definition = encounter && ANOMALY_BY_ID[encounter.anomalyId];
+          if (!player || !encounter || !definition) return;
+          if (payload.actionId !== 'retreat') {
+            sendError(ws, "В режиме GURPS используйте серию проверок навыков.");
+            return;
+          }
+          const action = definition.minigame.actions.find(candidate => candidate.id === payload.actionId);
+          if (!action) {
+            sendError(ws, "Неизвестное действие аномалии.");
+            return;
+          }
+          applyEncounterAction(action, player.username);
+          broadcast("SYNC_APP_STATE", { map, gameState, messages });
+          break;
+        }
+
+        case "ANOMALY_GURPS_ROLL": {
+          const player = clients.get(ws);
+          const encounter = map?.activeAnomalyEncounter;
+          if (!player || !encounter) return;
+          if (encounter.mode === "minigame") {
+            sendError(ws, "Проверки GURPS отключены в режиме чистой мини-игры.");
+            return;
+          }
+          const target = Number(payload.target);
+          if (String(payload.skillTag || 'manual') === 'manual' && player.role !== 'gm') {
+            sendError(ws, 'Произвольный навык выбирает ведущий.'); return;
+          }
+          if (encounter.mode === 'hybrid' && encounter.rollResults.length >= 3) {
+            sendError(ws, 'В гибридном режиме доступны три вспомогательные проверки на сцену.'); return;
+          }
+          if (!Number.isFinite(target)) {
+            sendError(ws, "Укажите целевое значение навыка.");
+            return;
+          }
+          resolveGurpsRoll(String(payload.skillTag || "manual"), target, player.username, payload.foundryItemUuid ? String(payload.foundryItemUuid) : undefined);
+          const current = map.activeAnomalyEncounter;
+          const definition = current && ANOMALY_BY_ID[current.anomalyId];
+          if (current && definition && current.mode === "gurps-roll" && current.rollResults.length >= 5 && !current.result) {
+            finishEncounter(current.progress >= 2 ? "partialFailure" : "failure");
+          }
+          broadcast("SYNC_APP_STATE", { map, gameState, messages });
+          break;
+        }
+
+        case "ANOMALY_GM_PAUSE": {
+          const player = clients.get(ws);
+          if (!player || player.role !== "gm" || !map?.activeAnomalyEncounter) return;
+          map.activeAnomalyEncounter.paused = Boolean(payload.paused);
+          broadcast("SYNC_APP_STATE", { map, gameState, messages });
+          break;
+        }
+
+        case "ANOMALY_GM_RESOLVE": {
+          const player = clients.get(ws);
+          const allowedResults: EncounterResult[] = ["completeSuccess", "successWithCost", "partialFailure", "failure", "criticalFailure", "retreat"];
+          if (!player || player.role !== "gm" || !map?.activeAnomalyEncounter || !allowedResults.includes(payload.result)) return;
+          finishEncounter(payload.result);
           broadcast("SYNC_APP_STATE", { map, gameState, messages });
           break;
         }
@@ -1097,7 +1438,15 @@ wss.on("connection", (ws) => {
           const { playerId, deck } = payload;
           const profile = playerDb[playerId];
           if (!profile) return;
-          if (deck.length === 8) {
+          const availableCards = [...profile.unlockedCards];
+          const ownsEveryCard = Array.isArray(deck) && deck.every((card: unknown) => {
+            if (typeof card !== "string") return false;
+            const ownedIndex = availableCards.indexOf(card);
+            if (ownedIndex < 0) return false;
+            availableCards.splice(ownedIndex, 1);
+            return true;
+          });
+          if (Array.isArray(deck) && deck.length === 8 && ownsEveryCard) {
             profile.pazaakDeck = deck;
             savePlayerDb();
             ws.send(JSON.stringify({ type: "NOTIFICATION", payload: { text: "✅ Колода Паазака успешно сохранена!", type: "success" } }));
@@ -1372,6 +1721,7 @@ wss.on("connection", (ws) => {
 
           const botHand = evaluateDiceHand(botDice);
           const playerHand = evaluateDiceHand(playerDice);
+          activeDiceGames[playerId] = { bet, botDice, playerDice, rerollStep: 1 };
 
           ws.send(JSON.stringify({
             type: "DICE_STATE_SYNC",
@@ -1392,9 +1742,20 @@ wss.on("connection", (ws) => {
         }
 
         case "DICE_REROLL": {
-          const { playerId, username, bet, playerDice, lockedIndexes, botDice, rerollStep } = payload;
+          const { playerId } = payload;
+          const username = clients.get(ws)?.username || "Сталкер";
           const profile = playerDb[playerId];
-          if (!profile) return;
+          const game = activeDiceGames[playerId];
+          if (!profile || !game) {
+            sendError(ws, "Активная партия в кости не найдена.");
+            return;
+          }
+          const bet = game.bet;
+          const playerDice = game.playerDice;
+          const botDice = game.botDice;
+          const lockedIndexes = Array.isArray(payload.lockedIndexes) && payload.lockedIndexes.length === 5
+            ? payload.lockedIndexes.map(Boolean)
+            : [false, false, false, false, false];
 
           // Perform reroll on the user's unlocked dice
           const finalPlayerDice = playerDice.map((val: number, i: number) => {
@@ -1413,9 +1774,15 @@ wss.on("connection", (ws) => {
             return Math.floor(Math.random() * 6) + 1;
           });
 
-          const currentStep = rerollStep || 1;
+          const currentStep = game.rerollStep;
 
           if (currentStep === 1) {
+            activeDiceGames[playerId] = {
+              bet,
+              botDice: finalBotDice,
+              playerDice: finalPlayerDice,
+              rerollStep: 2
+            };
             // First reroll completed. Move to step 2, keep game active, clear user locks for the next decision
             ws.send(JSON.stringify({
               type: "DICE_STATE_SYNC",
@@ -1432,6 +1799,7 @@ wss.on("connection", (ws) => {
             }));
             appendSystemMessage(`🎲 Сталкер ${username} совершил первый переброс костей. Ожидается финальный ход.`, "info");
           } else {
+            delete activeDiceGames[playerId];
             // Second reroll completed. Proceed to final round evaluation (step 3)
             const finalBotHand = evaluateDiceHand(finalBotDice);
             const finalPlayerHand = evaluateDiceHand(finalPlayerDice);
@@ -1503,6 +1871,10 @@ wss.on("connection", (ws) => {
           const { playerId, username, contestantName, betAmount } = payload;
           const profile = playerDb[playerId];
           if (!profile) return;
+          if (!activeRace.contestants.some(contestant => contestant.name === contestantName)) {
+            sendError(ws, "Выбранный участник забега не найден.");
+            return;
+          }
 
           if (activeRace.status !== "betting" && activeRace.status !== "none") {
             ws.send(JSON.stringify({ type: "NOTIFICATION", payload: { text: "❌ Ставки на этот заезд уже закрыты!", type: "danger" } }));
@@ -1566,7 +1938,7 @@ wss.on("connection", (ws) => {
 
           broadcastTavernGames();
 
-          const raceInterval = setInterval(() => {
+          activeRaceInterval = setInterval(() => {
             activeRace.tickCount++;
             let finishReached = false;
 
@@ -1624,7 +1996,10 @@ wss.on("connection", (ws) => {
             }
 
             if (finishReached) {
-              clearInterval(raceInterval);
+              if (activeRaceInterval) {
+                clearInterval(activeRaceInterval);
+                activeRaceInterval = null;
+              }
               const finalSorted = [...activeRace.contestants].sort((a,b) => b.position - a.position);
               const winner = finalSorted[0];
               activeRace.winner = winner.name;
@@ -1657,6 +2032,10 @@ wss.on("connection", (ws) => {
           const player = clients.get(ws);
           if (!player || player.role !== "gm") return;
 
+          if (activeRaceInterval) {
+            clearInterval(activeRaceInterval);
+            activeRaceInterval = null;
+          }
           activeRace.status = "none";
           activeRace.bets = [];
           activeRace.winner = null;
@@ -1683,9 +2062,12 @@ wss.on("connection", (ws) => {
           const itemName = map.inventory[itemIndex];
           
           let price = 200;
+          const matchingShopItem = shopItems.find(item => item.name === itemName);
           const artifactNames = ["Капля", "Кровь камня", "Слизь", "Колючка", "Медуза", "Вспышка", "Кристалл", "Бенгальский огонь", "Ночной Светоч"];
           const isArtifact = artifactNames.some(art => itemName.includes(art));
-          if (isArtifact) {
+          if (matchingShopItem) {
+            price = Math.max(1, Math.floor(matchingShopItem.price * 0.5));
+          } else if (isArtifact) {
             price = Math.floor(Math.random() * 400) + 600;
           } else {
             price = Math.floor(Math.random() * 100) + 150;
@@ -1775,10 +2157,15 @@ wss.on("connection", (ws) => {
           if (!player || player.role !== "gm") return;
 
           const { name, price, type, description } = payload;
+          const parsedPrice = Number(price);
+          if (typeof name !== "string" || !name.trim() || !isPositiveCreditAmount(parsedPrice)) {
+            sendError(ws, "Название товара и положительная целая цена обязательны.");
+            return;
+          }
           const newItem = {
             id: "item_" + Math.random().toString(36).substring(2, 9),
-            name,
-            price: parseInt(price, 10) || 120,
+            name: name.trim().slice(0, 100),
+            price: parsedPrice,
             type: type || "misc",
             description: description || "Специальный заказ КПК"
           };
@@ -1839,6 +2226,10 @@ wss.on("connection", (ws) => {
           const profile = playerDb[playerId];
           const item = shopItems.find(i => i.id === itemId);
           if (!profile || !item) return;
+          if (!isPositiveCreditAmount(item.price)) {
+            sendError(ws, "У товара указана некорректная цена.");
+            return;
+          }
 
           if (profile.balance < item.price) {
             ws.send(JSON.stringify({ type: "NOTIFICATION", payload: { text: "❌ Недостаточно средств на счете КПК!", type: "danger" } }));
@@ -1985,6 +2376,13 @@ wss.on("connection", (ws) => {
           const { playerId, betAmount, betType, betValue } = payload;
           const profile = playerDb[playerId];
           if (!profile) return;
+          const validRouletteBet = (betType === "number" && Number.isInteger(Number(betValue)) && Number(betValue) >= 0 && Number(betValue) <= 36)
+            || (betType === "color" && ["red", "black"].includes(betValue))
+            || (betType === "parity" && ["even", "odd"].includes(betValue));
+          if (!validRouletteBet) {
+            sendError(ws, "Некорректный тип или значение ставки в рулетке.");
+            return;
+          }
           const activeClient = clients.get(ws);
           const activeUsername = activeClient ? activeClient.username : "Сталкер";
           if (profile.balance < betAmount) {
@@ -2063,6 +2461,10 @@ wss.on("connection", (ws) => {
           const { playerId, bet, score } = payload;
           const profile = playerDb[playerId];
           if (!profile) return;
+          if (!Number.isSafeInteger(score) || score < 0 || score > 10_000) {
+            sendError(ws, "Некорректный результат стрельбы.");
+            return;
+          }
           const activeClient = clients.get(ws);
           const activeUsername = activeClient ? activeClient.username : "Сталкер";
           if (profile.balance < bet) {
@@ -2120,6 +2522,10 @@ wss.on("connection", (ws) => {
           const { playerId, bet, chosenCup } = payload;
           const profile = playerDb[playerId];
           if (!profile) return;
+          if (!Number.isInteger(chosenCup) || chosenCup < 0 || chosenCup > 2) {
+            sendError(ws, "Выберите один из трёх напёрстков.");
+            return;
+          }
           const activeClient = clients.get(ws);
           const activeUsername = activeClient ? activeClient.username : "Сталкер";
           if (profile.balance < bet) {
@@ -2163,6 +2569,10 @@ wss.on("connection", (ws) => {
           const { playerId, bet } = payload;
           const profile = playerDb[playerId];
           if (!profile) return;
+          if (activeSvinyaBets[playerId] !== undefined) {
+            sendError(ws, "Партия в «Свинью» уже запущена.");
+            return;
+          }
           if (profile.balance < bet) {
             ws.send(JSON.stringify({ type: "NOTIFICATION", payload: { text: "❌ Недостаточно средств на балансе КПК!", type: "danger" } }));
             return;
@@ -2186,10 +2596,14 @@ wss.on("connection", (ws) => {
         case "SVINYA_FINISH": {
           const { playerId, result } = payload;
           const profile = playerDb[playerId];
-          if (!profile) return;
+          if (!profile || !["win", "tie", "lose"].includes(result)) return;
           const activeClient = clients.get(ws);
           const activeUsername = activeClient ? activeClient.username : "Сталкер";
-          const bet = activeSvinyaBets[playerId] || 100;
+          const bet = activeSvinyaBets[playerId];
+          if (bet === undefined) {
+            sendError(ws, "Активная партия в «Свинью» не найдена.");
+            return;
+          }
 
           let winAmount = 0;
           if (result === "win") {
