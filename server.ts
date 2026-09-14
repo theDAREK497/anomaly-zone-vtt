@@ -1332,7 +1332,9 @@ wss.on("connection", (ws) => {
             sendError(ws, "В режиме GURPS используйте серию проверок навыков.");
             return;
           }
-          const action = definition.minigame.actions.find(candidate => candidate.id === payload.actionId);
+          const action = definition.minigame.actions.find(
+            (candidate: AnomalyAction) => candidate.id === payload.actionId,
+          );
           if (!action) {
             sendError(ws, "Неизвестное действие аномалии.");
             return;

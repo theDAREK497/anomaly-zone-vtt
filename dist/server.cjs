@@ -1434,7 +1434,9 @@ wss.on("connection", (ws) => {
             sendError(ws, "\u0412 \u0440\u0435\u0436\u0438\u043C\u0435 GURPS \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u0443\u0439\u0442\u0435 \u0441\u0435\u0440\u0438\u044E \u043F\u0440\u043E\u0432\u0435\u0440\u043E\u043A \u043D\u0430\u0432\u044B\u043A\u043E\u0432.");
             return;
           }
-          const action = definition2.minigame.actions.find((candidate) => candidate.id === payload.actionId);
+          const action = definition2.minigame.actions.find(
+            (candidate) => candidate.id === payload.actionId
+          );
           if (!action) {
             sendError(ws, "\u041D\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043D\u043E\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435 \u0430\u043D\u043E\u043C\u0430\u043B\u0438\u0438.");
             return;

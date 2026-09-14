@@ -1776,7 +1776,9 @@ export const Tavern: React.FC<TavernProps> = ({
                       onClick={() => {
                         setGmItemName(preset.name);
                         setGmItemPrice(preset.price);
-                        setGmItemType(preset.type);
+                        setGmItemType(
+                          preset.type as "med" | "weapon" | "ammo" | "armor" | "art" | "misc"
+                        );
                         setGmItemDesc(preset.desc);
                       }}
                       className="bg-gray-800 hover:bg-gray-750 text-gray-300 hover:text-amber-400 border border-gray-700 hover:border-amber-900/50 rounded px-2 py-1 text-[10px] transition-colors cursor-pointer select-none"
