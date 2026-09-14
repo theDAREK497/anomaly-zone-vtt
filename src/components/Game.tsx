@@ -29,6 +29,9 @@ import {
   Info
 } from 'lucide-react';
 import { LootItem } from '../App';
+import { AnomalyEncounter } from './AnomalyEncounter';
+import { ANOMALY_BY_ID } from '../data/anomalies';
+import { RESULT_LABELS, SKILL_LABELS } from '../utils/anomaly-gameplay';
 
 interface GameProps {
   initialMap: GameMap;
@@ -47,6 +50,7 @@ interface GameProps {
   onExecuteImmediateAction?: (action: string) => void;
   username?: string;
   userId?: string;
+  ws?: WebSocket | null;
 }
 
 export function Game({ 
@@ -63,7 +67,8 @@ export function Game({
   onResetVotes,
   onExecuteImmediateAction,
   username = '',
-  userId = ''
+  userId = '',
+  ws = null
 }: GameProps) {
   const map = initialMap;
 
@@ -91,6 +96,7 @@ export function Game({
   // Keyboard controls for easier gameplay (only if they are GM, or if player skips confirm, we can let them key-press votes!)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (map.activeAnomalyEncounter || e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return;
       let action: string | null = null;
       switch (e.key) {
         case 'ArrowUp': action = 'UP'; break;
@@ -109,7 +115,7 @@ export function Game({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isGM, onExecuteImmediateAction, skipConfirm]);
+  }, [isGM, onExecuteImmediateAction, skipConfirm, map.activeAnomalyEncounter]);
 
   // Submit action after option confirmation checks completed
   const triggerActionVote = (action: string) => {
@@ -172,18 +178,11 @@ export function Game({
 
     if (cell.type === 'anomaly') {
       switch (cell.anomalyType) {
-        case 'fire':
-          return <Flame size={18} className="text-orange-500 absolute" />;
-        case 'trampoline':
-          return <Wind size={18} className="text-teal-400 absolute" />;
-        case 'sphere':
-          return <Compass size={18} className="text-cyan-400 absolute animate-spin [animation-duration:8s]" />;
-        case 'vortex':
-          return <RotateCw size={18} className="text-indigo-400 absolute animate-spin [animation-duration:3s]" />;
-        case 'time_loop':
-          return <Hourglass size={18} className="text-yellow-500 absolute" />;
-        case 'electric':
-          return <Zap size={18} className="text-blue-300 absolute" />;
+        case 'spore-forest': return <Sparkles size={18} className="text-lime-400 absolute" />;
+        case 'crystal-resonance': return <Gem size={18} className="text-cyan-300 absolute" />;
+        case 'echo-loop': return <RotateCw size={18} className="text-indigo-300 absolute" />;
+        case 'static-front': return <Zap size={18} className="text-blue-300 absolute" />;
+        case 'living-track': return <Compass size={18} className="text-amber-300 absolute" />;
         default:
           return <ShieldAlert size={18} className="text-red-500 absolute" />;
       }
@@ -385,7 +384,7 @@ export function Game({
             <span className="text-xs font-mono text-gray-400 flex items-center gap-1.5 uppercase">
               <Activity className="text-green-500" size={14} /> Здоровье Отряда
             </span>
-            <span className="text-sm font-bold font-mono text-green-400">{map.health}/{map.maxHealth} HP</span>
+            <span className="text-sm font-bold font-mono text-green-400">{map.health}/{map.maxHealth} ОЗ</span>
           </div>
           <div className="w-full bg-gray-950 h-3 rounded-full overflow-hidden border border-gray-800">
             <div 
@@ -401,7 +400,7 @@ export function Game({
             <span className="text-xs font-mono text-gray-400 flex items-center gap-1.5 uppercase">
               <Skull className="text-yellow-500" size={14} /> ФОНОВОЕ ЗАРАЖЕНИЕ
             </span>
-            <span className="text-sm font-bold font-mono text-yellow-400">{map.radiation}/{map.maxRadiation} РАД</span>
+            <span className="text-sm font-bold font-mono text-yellow-400">{map.radiation}/{map.maxRadiation} ед.</span>
           </div>
           <div className="w-full bg-gray-950 h-3 rounded-full overflow-hidden border border-gray-800">
             <div 
@@ -433,6 +432,8 @@ export function Game({
           </div>
         </div>
       </div>
+
+      {map.activeAnomalyEncounter && <AnomalyEncounter map={map} ws={ws} isGM={isGM} />}
 
       {/* 2. THE DYNAMIC FLEX GRID SIZING AREA WITH MAX AREA SPACE */}
       <div className="flex-1 bg-gray-950 rounded-lg border border-gray-800 overflow-hidden relative p-4 lg:p-6 flex flex-col items-center justify-center min-h-[350px]">
@@ -482,7 +483,7 @@ export function Game({
             {/* Turn limit countdown clock indicator */}
             <div className="flex items-center gap-2 bg-gray-950 border border-gray-800 py-1 px-3 rounded text-xs font-mono">
               <Hourglass size={14} className="text-amber-500 animate-spin" style={{ animationDuration: '4s' }} />
-              Таймер хода: <span className={`font-bold ${map.timerSeconds <= 15 ? 'text-red-500 animate-pulse' : 'text-amber-400'}`}>{map.timerSeconds || 60}с</span>
+              Таймер хода: <span className={`font-bold ${map.timerSeconds <= 15 ? 'text-red-500 animate-pulse' : 'text-amber-400'}`}>{Math.ceil(map.timerSeconds ?? 60)}с {map.activeAnomalyEncounter ? '· ПАУЗА' : ''}</span>
             </div>
           </div>
 
@@ -725,11 +726,30 @@ export function Game({
             <p className="flex items-center"><span className="shrink-0 w-3 h-3 bg-emerald-600/30 border border-emerald-500/40 mr-2.5 rounded-sm"></span> Точка Эвакуации</p>
             <p className="flex items-center"><span className="shrink-0 w-3 h-3 bg-amber-600/30 border border-amber-500/40 mr-2.5 rounded-sm"></span> Заброшенный схрон (хабар)</p>
             <p className="flex items-center"><span className="shrink-0 w-3 h-3 bg-purple-600/30 border border-purple-500/40 mr-2.5 rounded-sm"></span> Ценный артефакт</p>
-            <p className="flex items-center"><span className="shrink-0 w-3 h-3 bg-red-600/30 border border-red-500/40 mr-2.5 rounded-sm text-center flex items-center justify-center font-bold text-[8px] text-red-400">⚡</span> Опасная Аномалия (вспыхнет при взрыве)</p>
+            <p className="flex items-center"><span className="shrink-0 w-3 h-3 bg-red-600/30 border border-red-500/40 mr-2.5 rounded-sm text-center flex items-center justify-center font-bold text-[8px] text-red-400">◆</span> Аномалия ЭОН (сначала наблюдайте закон)</p>
           </div>
         </div>
 
       </div>
+
+      {isGM && (map.anomalyJournal?.length || 0) > 0 && (
+        <details className="bg-gray-900 border border-gray-800 rounded-lg p-4 shrink-0">
+          <summary className="cursor-pointer text-xs font-bold text-amber-400 uppercase">Закрытый журнал GM · аномалии ({map.anomalyJournal?.length})</summary>
+          <div className="mt-3 space-y-2 max-h-72 overflow-y-auto">
+            {[...(map.anomalyJournal || [])].reverse().map((entry, index) => (
+              <div key={`${entry.seed}-${index}`} className="bg-gray-950 border border-gray-800 rounded p-3 text-[11px] font-mono">
+                <div className="font-bold text-cyan-300">{ANOMALY_BY_ID[entry.anomalyId]?.name || entry.anomalyId} · {RESULT_LABELS[entry.result]}</div>
+                <div className="text-gray-400 mt-1">Ключ: {entry.seed} · способ: {entry.mode === 'field' ? 'эффект на поле' : entry.mode === 'gurps-roll' ? 'кубики' : entry.mode === 'hybrid' ? 'мини-игра с навыками' : 'мини-игра'} · ошибки: {entry.mistakes}</div>
+                <div className="text-gray-500">Участники: {entry.participants.join(', ') || 'не указаны'} · навыки: {entry.usedSkills.map(skill => SKILL_LABELS[skill] || 'Выбор ведущего').join(', ') || 'нет'}</div>
+                <div className="text-gray-500">Броски: {entry.rollResults.map(roll => `${roll.skillTag}${roll.foundryItemUuid ? ` [${roll.foundryItemUuid}]` : ''}: ${roll.roll}/${roll.target}, маржа ${roll.margin}`).join(' · ') || 'нет'}</div>
+                <div className="text-gray-500">Решения: {entry.decisions.join(' → ') || 'нет'} </div>
+                {(entry.consequences.length > 0 || entry.rewards.length > 0 || entry.trainChanges.length > 0) && <div className="mt-1 text-amber-300">Последствия: {[...entry.consequences, ...entry.trainChanges].join('; ') || 'нет'} · Награды: {entry.rewards.join('; ') || 'нет'}</div>}
+                <div className="text-gray-600 mt-1">Завершено: {entry.completedAt}</div>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
 
       {/* 4. CHAT-THEMATIC RADAR CONFIRMATION DIALOG MODAL Overlay */}
       {voteToConfirm && (

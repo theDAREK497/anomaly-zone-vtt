@@ -1,14 +1,15 @@
 {
-  "tavernName": "Бар «100 Рентген»",
+  "tavernName": "Форпост Долга",
   "enabledGames": {
-    "trades": true,
-    "pazaak": true,
-    "dice": true,
+    "trades": false,
+    "pazaak": false,
+    "dice": false,
     "races": true,
-    "slots": true,
-    "roulette": true,
-    "shooting": true,
-    "thimblerig": true,
+    "slots": false,
+    "roulette": false,
+    "shooting": false,
+    "thimblerig": false,
     "svinya": true
-  }
+  },
+  "merchantName": "Зулус"
 }

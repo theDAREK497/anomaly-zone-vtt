@@ -204,7 +204,7 @@ export default function App() {
     ws.onerror = (err) => {
       console.error("WebSocket Error:", err);
     };
-  }, [userId]);
+  }, []);
 
   // Handle auto connection
   useEffect(() => {
@@ -229,6 +229,12 @@ export default function App() {
       setActiveTab('map');
     }
   }, [isGM, activeTab]);
+
+  useEffect(() => {
+    if (gameState === 'playing' && activeTab === 'bar') {
+      setActiveTab('map');
+    }
+  }, [gameState, activeTab]);
 
   const syncAll = (newGameState: GameState, newMap: GameMap | null, newMessages: ChatMessage[]) => {
     setGameState(newGameState);
@@ -282,7 +288,6 @@ export default function App() {
     localStorage.setItem('anomaly_username', chosenName);
     localStorage.setItem('anomaly_role', chosenRole);
 
-    connectSocket(chosenRole, chosenName);
   };
 
   const claimForceGM = () => {
@@ -517,7 +522,15 @@ export default function App() {
               </button>
               <button
                 onClick={() => setActiveTab('bar')}
-                className={`px-3 py-1.5 rounded transition font-bold cursor-pointer flex items-center gap-1.5 ${activeTab === 'bar' ? 'bg-emerald-600 text-gray-950' : 'text-gray-400 hover:text-gray-200'}`}
+                disabled={gameState === 'playing'}
+                title={gameState === 'playing' ? 'Бар недоступен во время активной экспедиции' : undefined}
+                className={`px-3 py-1.5 rounded transition font-bold flex items-center gap-1.5 ${
+                  gameState === 'playing'
+                    ? 'text-gray-700 cursor-not-allowed opacity-50'
+                    : activeTab === 'bar'
+                    ? 'bg-emerald-600 text-gray-950 cursor-pointer'
+                    : 'text-gray-400 hover:text-gray-200 cursor-pointer'
+                }`}
               >
                 <Flame className="w-3.5 h-3.5" />
                 <span>Бар «100 Рентген»</span>
@@ -637,6 +650,7 @@ export default function App() {
                     onExecuteImmediateAction={executeImmediateAction}
                     username={username}
                     userId={userId}
+                    ws={socketRef.current}
                   />
                 )}
 

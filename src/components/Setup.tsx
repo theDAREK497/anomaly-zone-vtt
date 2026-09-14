@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { GenerationParams, AnomalyType } from '../utils/generator';
 import { LootItem } from '../App';
+import { ANOMALY_DEFINITIONS } from '../data/anomalies';
+import { KIND_LABELS } from '../utils/anomaly-gameplay';
 
 interface SetupProps {
   onGenerate: (params: GenerationParams) => void;
@@ -21,7 +23,7 @@ export function Setup({ onGenerate, stashLoot, setStashLoot, artifactLoot, setAr
     difficulty: 5,
     seed: Math.random().toString(36).substring(2, 8).toUpperCase(),
     salt: 'STALKER',
-    allowedAnomalies: ['fire', 'trampoline', 'sphere', 'electric', 'vortex', 'time_loop'],
+    allowedAnomalies: ANOMALY_DEFINITIONS.map(item => item.id),
     radiationPercentage: 30,
     maxHealth: 100,
     maxRadiation: 100,
@@ -29,6 +31,11 @@ export function Setup({ onGenerate, stashLoot, setStashLoot, artifactLoot, setAr
     detectorCharges: 3,
     detectorLevel: 2,
     boltCharges: 10,
+    anomalyResolutionMode: 'hybrid',
+    anomalyTimerEnabled: true,
+    anomalySpeed: 1,
+    anomalyCriticalRollAutoSuccess: false,
+    silentZoneInterfaceComms: true,
   });
 
   const handleAnomalyToggle = (id: AnomalyType) => {
@@ -44,7 +51,7 @@ export function Setup({ onGenerate, stashLoot, setStashLoot, artifactLoot, setAr
     const { name, value, type } = e.target;
     setParams(prev => ({
       ...prev,
-      [name]: type === 'number' || name === 'detectorLevel' || name === 'maxHealth' || name === 'maxRadiation' || name === 'geigerCharges' || name === 'detectorCharges' || name === 'boltCharges' ? Number(value) : value
+      [name]: type === 'checkbox' ? (e.target as HTMLInputElement).checked : type === 'number' || name === 'detectorLevel' || name === 'maxHealth' || name === 'maxRadiation' || name === 'geigerCharges' || name === 'detectorCharges' || name === 'boltCharges' || name === 'anomalySpeed' ? Number(value) : value
     }));
   };
 
@@ -130,11 +137,11 @@ export function Setup({ onGenerate, stashLoot, setStashLoot, artifactLoot, setAr
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium text-gray-400 mb-1">Ширина (M)</label>
+            <label className="block text-sm font-medium text-gray-400 mb-1">Ширина, клеток</label>
             <input type="number" name="width" value={params.width} onChange={handleChange} min="5" max="30" className="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-green-500" />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-400 mb-1">Высота (N)</label>
+            <label className="block text-sm font-medium text-gray-400 mb-1">Высота, клеток</label>
             <input type="number" name="height" value={params.height} onChange={handleChange} min="5" max="30" className="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-green-500" />
           </div>
         </div>
@@ -178,11 +185,11 @@ export function Setup({ onGenerate, stashLoot, setStashLoot, artifactLoot, setAr
 
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className="block text-xs font-mono text-emerald-500 mb-1">⚡ Здоровье Партии (HP)</label>
+            <label className="block text-xs font-mono text-emerald-500 mb-1">⚡ Здоровье отряда (ОЗ)</label>
             <input type="number" name="maxHealth" value={params.maxHealth} onChange={handleChange} min="10" max="500" className="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-green-500 text-sm font-bold" />
           </div>
           <div>
-            <label className="block text-xs font-mono text-yellow-500 mb-1">☣️ Лимит Радиации (RAD)</label>
+            <label className="block text-xs font-mono text-yellow-500 mb-1">☣️ Лимит радиации</label>
             <input type="number" name="maxRadiation" value={params.maxRadiation} onChange={handleChange} min="10" max="500" className="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-green-500 text-sm font-bold" />
           </div>
         </div>
@@ -219,26 +226,19 @@ export function Setup({ onGenerate, stashLoot, setStashLoot, artifactLoot, setAr
 
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium text-gray-400 mb-1">Seed</label>
+            <label className="block text-sm font-medium text-gray-400 mb-1">Ключ генерации</label>
             <input type="text" name="seed" value={params.seed} onChange={handleChange} className="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-green-500" />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-400 mb-1">Соль</label>
+            <label className="block text-sm font-medium text-gray-400 mb-1">Модификатор ключа</label>
             <input type="text" name="salt" value={params.salt} onChange={handleChange} className="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-green-500" />
           </div>
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-400 mb-2">Типы аномалий</label>
-          <div className="flex flex-wrap gap-4">
-            {[
-              { id: 'fire', label: 'Огненная' },
-              { id: 'trampoline', label: 'Трамплин' },
-              { id: 'sphere', label: 'Сфера' },
-              { id: 'electric', label: 'Электрическая' },
-              { id: 'vortex', label: 'Воронка' },
-              { id: 'time_loop', label: 'Хроно-сдвиг' }
-            ].map(anomaly => (
+          <label className="block text-sm font-medium text-gray-400 mb-2">Аномалии ЭОН</label>
+          <div className="grid grid-cols-1 gap-2 max-h-64 overflow-y-auto bg-gray-900/50 p-3 rounded border border-gray-700">
+            {ANOMALY_DEFINITIONS.map(anomaly => (
               <label key={anomaly.id} className="flex items-center text-sm text-gray-300 cursor-pointer">
                 <input 
                   type="checkbox" 
@@ -246,10 +246,24 @@ export function Setup({ onGenerate, stashLoot, setStashLoot, artifactLoot, setAr
                   onChange={() => handleAnomalyToggle(anomaly.id as AnomalyType)}
                   className="mr-2"
                 />
-                {anomaly.label}
+                <span><b>{anomaly.name}</b> <span className="text-[10px] text-gray-500">({KIND_LABELS[anomaly.encounterType]}, опасность {anomaly.dangerTier})</span></span>
               </label>
             ))}
           </div>
+        </div>
+
+        <div className="border border-cyan-900/50 bg-cyan-950/10 rounded p-3 space-y-3">
+          <div className="text-xs font-bold uppercase text-cyan-400">Разрешение аномалий</div>
+          <select name="anomalyResolutionMode" value={params.anomalyResolutionMode} onChange={handleChange} className="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 text-sm">
+            <option value="minigame">Мини-игра</option>
+            <option value="gurps-roll">Серия бросков GURPS</option>
+            <option value="hybrid">Гибрид: броски дают преимущества</option>
+          </select>
+          <label className="flex items-center gap-2 text-xs"><input type="checkbox" name="anomalyTimerEnabled" checked={params.anomalyTimerEnabled} onChange={handleChange} /> Таймер испытания: {params.difficulty <= 3 ? '2 минуты' : '1 минута'} (ведущий может приостановить)</label>
+          <p className="text-xs text-gray-400">Режим разрешения применяется к мини-играм. Полевые эффекты срабатывают на карте, а аномалии с проверками кубиками всегда используют навыки. Таймер хода заморожен до кнопки «ОК».</p>
+          <label className="text-xs block">Скорость интерфейса: {params.anomalySpeed}×<input type="range" name="anomalySpeed" min="0.5" max="2" step="0.25" value={params.anomalySpeed} onChange={handleChange} className="w-full" /></label>
+          <label className="flex items-center gap-2 text-xs"><input type="checkbox" name="anomalyCriticalRollAutoSuccess" checked={params.anomalyCriticalRollAutoSuccess} onChange={handleChange} /> Критический бросок может завершить сцену автоматически</label>
+          <label className="flex items-center gap-2 text-xs"><input type="checkbox" name="silentZoneInterfaceComms" checked={params.silentZoneInterfaceComms} onChange={handleChange} /> Ограничение связи «Немой зоны» внутри мини-игры (чат Foundry не затрагивается)</label>
         </div>
 
         <button type="submit" className="w-full mt-6 bg-green-600 hover:bg-green-500 text-white font-bold py-3 px-4 rounded transition-colors">
