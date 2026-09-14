@@ -1,87 +1,142 @@
-# Аномальная Зона (Anomaly Zone Mini-Game)
+# Anomaly Zone VTT
 
-Интерактивный модуль-мини-игра для настольных ролевых игр сталкерской, научно-фантастической или постапокалиптической тематики (например, **S.T.A.L.K.E.R.**, **Metro**, **Fallout**). Разработан как независимое веб-приложение, которое легко встраивается в **Foundry VTT** через `IFrame` или как самостоятельный готовый модуль.
+[![CI](https://github.com/theDAREK497/anomaly-zone-vtt/actions/workflows/ci.yml/badge.svg)](https://github.com/theDAREK497/anomaly-zone-vtt/actions/workflows/ci.yml)
 
-## 🌟 Возможности (Features)
+A procedural browser mini-game and Foundry VTT utility for hazardous-zone exploration in post-apocalyptic and science-fiction tabletop campaigns.
 
-*   **Процедурная генерация карт:** Настраивайте размеры сетки (M x N), плотность аномалий, количество схронов, артефактов и выходов. Карта генерируется на основе случайного сида (`seed`) + соли (`salt`), обеспечивая повторяемость.
-*   **Гарантированный безопасный путь:** Алгоритм гарантирует, что от входа до хотя бы одного из выходов будет проложена непрерывная полоса, свободная от аномалий и радиации.
-*   **Гибкий редактор лута (Новинка!):** Отдельная вкладка позволяет ГМу полностью настроить содержимое хабара (как в схронах, так и при поднятии артефактов). Задавайте любые названия предметов и их **шанс выпадения (вес)**.
-*   **6 типов аномалий с уникальными эффектами:**
-    *   🔥 **Столб пламени:** Огненный столб, наносящий прямой ущерб.
-    *   ⚡ **Электра:** Электрический разряд с высоким мгновенным уроном.
-    *   💨 **Трамплин:** Динамическая аномалия, физически отбрасывающая (телепортирующая) группу в случайную точку на карте.
-    *   🫧 **Сфера:** Расширяющаяся аномалия. Стекание в неё вызывает взрывной эффект, заражающий все 8 соседних пустых клеток. Расширяется только один раз, исключая мертвые петли.
-    *   🌀 **Воронка (Новинка!):** Гравитационное искажение, которое затягивает группу и отбрасывает на случайную соседнюю клетку.
-    *   ⏳ **Хроно-сдвиг (Новинка!):** Временная петля, возвращающая команду в самое начало пути (на клетку входа).
-*   **Зоны радиационного заражения:** Интуитивная визуализация уровня радиации с помощью тепловых цветов (зеленый -> желтый -> оранжевый). Плотность регулируется ползунком (0-100%).
-*   **Инструменты Сталкера:**
-    *   🎯 **Бросок болта:** Направленная проверка соседних клеток на наличие скрытых аномалий.
-    *   📟 **Детектор радиации (Счётчик Гейгера):** Сканирует область 5х5 вокруг группы и показывает точный уровень фона.
-    *   🔬 **Анализатор артефактов:** Сканирует радиус в 3 клетки на наличие ценного хабара.
-*   **Режим мастера (GM Mode):** Возможность в один клик показать всю скрытую карту (аномалии, радиацию, схроны и артефакты) со встроенными показателями уровней прямо поверх клеток.
-*   **Полная адаптивность:** Сетка корректно масштабируется под гигантские размеры (например, 30х30) благодаря виртуализированной полосе прокрутки, предотвращая искажение ячеек.
+The project combines deterministic map generation, hidden information, anomaly encounters, player/GM interaction and a WebSocket-backed multiplayer support layer.
 
----
+> Independent tabletop utility. It is not affiliated with any referenced commercial franchise.
 
-## 🛠️ Инструкция по интеграции в Foundry VTT
+## Highlights
 
-Интегрировать мини-игры в Foundry VTT можно двумя способами.
+- deterministic procedural maps based on seed and salt;
+- protected route generation between the entrance and an exit;
+- configurable anomaly and radiation density;
+- 14 anomaly definitions with multiple encounter styles;
+- 7 field encounters, 4 interactive puzzle encounters and 3 roll-driven encounters;
+- anomaly journal and encounter state;
+- player tools for probing, radiation scanning and artifact detection;
+- GM controls and reveal/debug workflows;
+- WebSocket synchronization between GM and players;
+- Foundry VTT module metadata and integration files;
+- automated gameplay and server integration checks.
 
-### Способ 1: Прямое встраивание через IFrame (Рекомендуемый, Самый простой)
+## Architecture
 
-Поскольку приложение уже скомпилировано и размещено на сверхбыстром хостинге, вы можете встроить его прямо в Foundry VTT:
+```mermaid
+flowchart LR
+    Config[GM configuration] --> Generator[Deterministic generator]
+    Generator --> Map[Hazardous zone]
+    Map --> Encounter[Anomaly encounter system]
+    Encounter --> Journal[Encounter journal]
 
-1.  В Foundry VTT создайте новую **Запись в журнале (Journal Entry)**.
-2.  Перейдите в режим редактирования текста и переключитесь на просмотр HTML-кода (кнопка `</>` или `Source Code` в редакторе).
-3.  Вставьте следующий код (`iframe` с ссылкой на приложение):
-    ```html
-    <iframe src="https://ais-pre-bosxmxe4eg2ylwmmcdxmeq-324397246425.europe-west2.run.app" style="width:100%; height:800px; border:2px solid #111; background-color:#000;" allow="fullscreen"></iframe>
-    ```
-4.  Сохраните журнал. Теперь вы можете выводить данный журнал игрокам или открывать его во всплывающем окне прямо во время сессии.
+    GM[GM client] <--> WS[WebSocket server]
+    Player[Player client] <--> WS
+    WS <--> State[Shared game state]
 
----
+    Foundry[Foundry VTT] --> Module[module.js / module.json]
+    Module --> App[React application]
+```
 
-### Способ 2: Установка как готового модуля Foundry VTT (v11, v12, v14+)
+## Anomaly system
 
-В проект уже добавлены все необходимые настроенные манифесты (`module.json`, `module.js`, `app-template.html`), указывающие на ваш публичный репозиторий.
+The anomaly catalogue currently contains 14 definitions split across three gameplay styles:
 
-#### Вариант А: Прямая установка через Foundry VTT (Самый удобный)
+- **7 field encounters** for immediate environmental effects;
+- **4 puzzle encounters** with deterministic, seed-based challenges;
+- **3 roll-driven encounters** for tabletop-style resolution.
 
-Для установки модуля вашим игрокам или вам на сервер напрямую через Foundry:
-1. Выполните сборку проекта локально:
-   ```bash
-   npm run build
-   ```
-2. Отправьте все новые файлы, включая папки `dist/` и сгенерированные конфигурационные файлы (`module.json`, `module.js`, `app-template.html`) в ваш публичный репозиторий GitHub.
-3. В клиенте/сервере **Foundry VTT** перейдите во вкладку **Add-on Modules**, нажмите синюю кнопку **Install Module**.
-4. В поле **Manifest URL** (внизу окна) вставьте следующую прямую ссылку на ваш файл конфигурации:
-   ```
-   https://raw.githubusercontent.com/theDAREK497/ANOMALY-ZONE-foundry/main/module.json
-   ```
-5. Нажмите **Install**. Foundry VTT v11-14+ автоматически загрузит архив ветки `main`, разархивирует её в рабочую директорию и назовёт модуль `anomaly-zone-minigame`!
+The validation script checks catalogue consistency, deterministic generation, puzzle solvability, seeded field outcomes, dice distribution and encounter timer rules.
 
----
+## Automated validation
 
-#### Вариант Б: Локальный перенос файлов ручной сборки
+The repository includes two purpose-built test scripts rather than only UI smoke tests.
 
-Если вы хотите запустить этот код локально на сервере Foundry вручную без скачивания из интернета:
-1. Выполните команду сборки локально:
-   ```bash
-   npm run build
-   ```
-2. Создайте в пользовательской директории Foundry (`Data/modules/`) папку с точным именем `anomaly-zone-minigame`.
-3. Скопируйте в неё следующие файлы из этого репозитория:
-   * `module.json`
-   * `module.js`
-   * `app-template.html`
-   * Папку `dist/` (со всем её содержимым)
-4. Войдите в Foundry VTT, активируйте модуль `Anomaly Zone Mini-game` в настройках своего игрового мира. На левой панели инструментов (категория **Token Controls**) появится иконка значка радиации ☢️ — нажав на неё, вы откроете интерфейс мини-игры во всплывающем фрейме!
+`npm run check:anomalies` validates the core anomaly catalogue and gameplay logic across hundreds of generated cases.
 
----
+`npm run test:anomaly-server` builds and starts the production server, connects WebSocket clients and checks multiplayer/server behaviour including encounter completion, timers, pause/resume, acknowledgement, failure states, retreat, damage and movement effects.
 
-## ⚡ Оптимизация сборки и скорость загрузки
+## Tech stack
 
-Модуль спроектирован с упором на максимальное быстродействие:
-*   **Нулевые внешние запросы к бэкандам:** Логика генерации полностью работает на стороне клиента в браузере (на основе детерминированного генератора `Mulberry32`). Это экономит трафик и убирает задержки.
-*   **Использование Tailwind & Vite:** Итоговый бандл имеет ультра-легкий размер (~120KB), что гарантирует мгновенную загрузку даже на медленном подключении к серверу Foundry.
+| Area | Technology |
+| --- | --- |
+| UI | React 19 |
+| Language | TypeScript |
+| Build | Vite, esbuild |
+| Styling | Tailwind CSS |
+| Motion / icons | Motion, Lucide React |
+| Server | Node.js, Express |
+| Realtime | WebSocket (`ws`) |
+| VTT integration | Foundry VTT module files |
+| CI | GitHub Actions |
+
+## Local development
+
+```bash
+git clone https://github.com/theDAREK497/anomaly-zone-vtt.git
+cd anomaly-zone-vtt
+npm ci
+npm run dev
+```
+
+## Validation
+
+Run the complete local validation sequence:
+
+```bash
+npm run lint
+npm run check:anomalies
+npm run build
+npm run test:anomaly-server
+npm audit
+```
+
+The server integration test expects the production bundle from `npm run build`.
+
+## Foundry VTT
+
+The repository includes:
+
+```text
+module.json
+module.js
+app-template.html
+dist/
+```
+
+Manifest URL:
+
+```text
+https://raw.githubusercontent.com/theDAREK497/anomaly-zone-vtt/main/module.json
+```
+
+The module metadata targets Foundry compatibility from v11 and is currently marked as verified through v14.
+
+## Repository structure
+
+```text
+src/
+  components/               React gameplay/UI components
+  data/anomalies.ts         anomaly catalogue
+  utils/generator.ts        deterministic zone generation
+  utils/anomaly-gameplay.ts anomaly encounter logic
+scripts/
+  validate-anomalies.ts     deterministic/gameplay validation
+  test-anomaly-server.ts    WebSocket/server integration checks
+server.ts                   multiplayer support server
+module.json                 Foundry VTT metadata
+module.js                   Foundry integration
+db_*.json                   configurable local game data
+dist/                       production output
+```
+
+## Engineering focus
+
+The project is primarily an exploration of deterministic procedural systems and stateful multiplayer tabletop tooling.
+
+The most important invariants are executable rather than only documented: the anomaly catalogue, generated puzzles, random outcomes, encounter timers and multiplayer server flows are covered by automated validation scripts and CI.
+
+## License
+
+Mozilla Public License 2.0. See `LICENSE`.
